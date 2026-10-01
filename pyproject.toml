@@ -1,8 +1,0 @@
-[project]
-name = "crew"
-version = "0.6.0"
-description = "Crew: one ask, a coordinator, a proof - verified work on the Hermes kanban board."
-license = "Apache-2.0"
-
-[project.entry-points."hermes_agent.plugins"]
-crew = "crew:register"

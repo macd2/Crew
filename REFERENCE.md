@@ -179,7 +179,6 @@ scripts/crew_proofs.py         runs every proof, each on the crew-proofs board (
 scripts/crew_proof_board.py    the proofs board: its env, the exit-2 guard, scratch boards, a dashboard for a proof
 install.py             the installer
 install.sh             thin wrapper
-pyproject.toml         entry point crew = crew:register
 ```
 
 ## Proofs
