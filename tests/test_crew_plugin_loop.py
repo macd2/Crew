@@ -27,8 +27,10 @@ class TickTests(unittest.TestCase):
     def setUp(self):
         self.started = []
         self.tool = types.SimpleNamespace(__file__=str(REPO / "scripts" / "crew_coordinator.py"),
-                                          lock_live=lambda board: self.live)
+                                          lock_live=lambda board: self.live,
+                                          has_work=lambda board: self.work)
         self.live = False
+        self.work = True
         for p in (mock.patch.object(P, "_coordinator_tool", lambda: self.tool),
                   mock.patch.object(P, "HOME", _HOME),
                   mock.patch.object(P.subprocess, "Popen", lambda args, **kw: self.started.append((args, kw)))):
@@ -41,6 +43,11 @@ class TickTests(unittest.TestCase):
         self.assertEqual(["--once", "--board", "proofs"], args[2:])
         self.assertTrue(kw["start_new_session"])
         self.assertEqual(P.subprocess.DEVNULL, kw["stdin"])
+
+    def test_a_board_with_no_new_crew_event_starts_no_process(self):
+        self.work = False
+        P.crew_tick(board="proofs", dry_run=False, outcome="idle")
+        self.assertEqual([], self.started)
 
     def test_the_default_board_passes_no_board_flag(self):
         P.crew_tick(board=None, dry_run=False, outcome="ok")

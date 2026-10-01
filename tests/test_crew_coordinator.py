@@ -637,5 +637,60 @@ class RunPassTests(unittest.TestCase):
         self.assertEqual(0, cc.load_cursor(self.board))         # the failed card repeats next pass
 
 
+class HasWorkTests(unittest.TestCase):
+    """The tick gate: a pass is started only when run_pass would find something."""
+
+    def setUp(self):
+        build_db()
+        self.cursor = os.path.join(os.environ["HERMES_HOME"], "crew", "coordinator-cursor.json")
+        os.makedirs(os.path.dirname(self.cursor), exist_ok=True)
+        if os.path.exists(self.cursor):
+            os.unlink(self.cursor)
+
+    def set_cursor(self, n):
+        cc.save_cursor(n)
+
+    def add_event(self, eid, kind):
+        sql("insert into task_events (id, task_id, kind, payload, created_at) values (?, 't', ?, '{}', 0)",
+            (eid, kind))
+
+    def test_no_cursor_yet_means_one_pass_to_initialise_it(self):
+        self.assertTrue(cc.has_work())
+
+    def test_nothing_newer_than_the_cursor_is_no_work(self):
+        self.add_event(5, "blocked")
+        self.set_cursor(5)
+        self.assertFalse(cc.has_work())
+
+    def test_noise_events_newer_than_the_cursor_are_no_work(self):
+        self.set_cursor(5)
+        for i, kind in enumerate(("heartbeat", "claimed", "commented", "crew_decision"), start=6):
+            self.add_event(i, kind)
+        self.assertFalse(cc.has_work())
+
+    def test_every_crew_event_kind_newer_than_the_cursor_is_work(self):
+        for kind in cc.EVENT_KINDS:
+            build_db()
+            self.set_cursor(5)
+            self.add_event(6, kind)
+            self.assertTrue(cc.has_work(), kind)
+
+    def test_it_agrees_with_run_pass_on_the_same_board(self):
+        self.set_cursor(5)
+        self.add_event(6, "heartbeat")
+        self.assertFalse(cc.has_work())
+        self.assertEqual(0, cc.run_pass(cc.Ctx(_DB, None, True, False, say=lambda *_: None))["events"])
+        self.add_event(7, "gave_up")
+        self.assertTrue(cc.has_work())
+        self.assertEqual(1, cc.run_pass(cc.Ctx(_DB, None, True, False, say=lambda *_: None))["events"])
+
+    def test_a_missing_board_is_no_work_and_a_broken_read_fails_open(self):
+        with mock.patch.object(cc, "board_db", lambda b=None: os.path.join(_TMP, "nope.db")):
+            self.assertFalse(cc.has_work())
+        self.set_cursor(5)
+        with mock.patch.object(cc, "q", mock.Mock(side_effect=sqlite3.OperationalError("locked"))):
+            self.assertTrue(cc.has_work())
+
+
 if __name__ == "__main__":
     unittest.main()

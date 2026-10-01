@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -760,6 +761,25 @@ def handle_card(ctx, card_id, events):
 
 
 # ------------------------------------------------------------------------------------ one pass
+
+
+def has_work(board=None):
+    """True when a pass would do something: no cursor yet (it initialises one) or a crew event newer than the
+    cursor. The same predicate run_pass reads, so False is exactly a pass that exits with 0 events. Any error
+    answers True: a broken check must cost one extra pass, never a missed card."""
+    try:
+        db = board_db(board)
+        if not os.path.exists(db):
+            return False
+        cursor = load_cursor(board)
+        if cursor is None:
+            return True
+        marks = ",".join("?" * len(EVENT_KINDS))
+        rows = q(types.SimpleNamespace(db=db), "select 1 from task_events where id > ? and kind in (%s) limit 1"
+                 % marks, (cursor,) + EVENT_KINDS)
+        return bool(rows)
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def run_pass(ctx, only_card=None, since=None):

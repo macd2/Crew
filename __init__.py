@@ -1116,9 +1116,9 @@ def crew_diagnose_preload(user_message=None, **_kw):
 
 # ---------------------------------------------------------------- the coordinator tick
 # on_kanban_dispatch_tick fires in the DISPATCHER process (the gateway) once per tick, after the dispatch lock
-# is released. It must stay fast: it only starts `crew_coordinator.py --once` detached when no pass is live.
-# The pass reads the board's events since its own cursor, so a tick that carries nothing costs one process
-# start and one query. Blocked cards are never re-assigned anywhere: the card stays with its writer profile
+# is released. It must stay fast: it only starts `crew_coordinator.py --once` detached when no pass is live
+# AND the board has a crew event newer than the pass cursor (`has_work`, one read-only query in this process).
+# A board with nothing new starts no process at all. Blocked cards are never re-assigned anywhere: the card stays with its writer profile
 # and the coordinator acts on it in place (hermes_cli/plugins.py, hermes_cli/kanban_db.py _fire_dispatch_tick_hook).
 
 _COORDINATOR_MOD = None
@@ -1147,7 +1147,7 @@ def crew_tick(board=None, dry_run=False, outcome=None, **_kw):
         return None
     try:
         tool = _coordinator_tool()
-        if tool is None or tool.lock_live(board):
+        if tool is None or tool.lock_live(board) or not tool.has_work(board):
             return None
         log = os.path.join(HOME, "crew", "coordinator.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
