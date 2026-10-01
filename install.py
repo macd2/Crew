@@ -210,18 +210,49 @@ def _owner_record_set(**keys):
         json.dump(data, fh, indent=1, sort_keys=True)
 
 
-def step_owner(profile, apply):
+def step_owner(profile, apply, force=False):
     """<base home>/crew/owner.json: the profile crew is installed into (the owner's chat profile) and, after
     --publish, the dashboard's public URL. The feed, the dashboard and the proofs read it through
-    crew_card.owner_profile() / dashboard_url(), so no script names a profile or a host."""
+    crew_card.owner_profile() / dashboard_url(), so no script names a profile or a host.
+    The first install records its profile; installing into another profile later never moves the owner
+    silently - `--owner` does."""
     name = (profile or "").strip() or "default"
     rec = _owner_record()
+    if rec.get("profile") and rec.get("profile") != name and not force:
+        return "OK", "owner stays %s (pass --owner to make %s the owner)" % (rec["profile"], name)
     if rec.get("profile") == name and rec.get("package") == str(SRC_DIR):
         return "OK", "owner profile recorded (%s)" % name
     if not apply:
         return "CHANGED", "record owner profile %s and package %s -> %s" % (name, SRC_DIR, OWNER_RECORD)
     _owner_record_set(profile=name, package=str(SRC_DIR))
     return "CHANGED", "owner profile %s and package recorded in %s" % (name, OWNER_RECORD)
+
+
+def step_other_copies(profile_home, prefix, apply):
+    """Every other profile that already has crew gets this version too (owner, 2026-10-01: "only the latest
+    released version in every profile"): plugin, skills, scripts and roles file, nothing else - its
+    config, services and ownership are left alone. Role profiles are kept current by the profiles step."""
+    base = str(Path.home() / ".hermes")
+    roles = {home for _r, _n, home, _t in _role_plans(prefix)}
+    homes = [base] + sorted(str(p) for p in (Path(base) / "profiles").glob("*") if p.is_dir())
+    stale = []
+    for home in homes:
+        if os.path.abspath(home) in (os.path.abspath(profile_home),) or home in roles:
+            continue
+        if not os.path.isdir(os.path.join(home, "plugins", "crew")):
+            continue
+        steps = [f(home, False) for f in (step_plugin, step_skills, step_scripts, step_roles)]
+        if any(st == "CHANGED" for st, _d in steps):
+            stale.append(home)
+    if not stale:
+        return "OK", "every other crew copy is this version"
+    names = ", ".join(os.path.basename(h) if h != base else "default" for h in stale)
+    if not apply:
+        return "CHANGED", "bring crew up to this version in: %s" % names
+    for home in stale:
+        for f in (step_plugin, step_skills, step_scripts, step_roles):
+            f(home, True)
+    return "CHANGED", "crew brought up to this version in: %s" % names
 
 
 def _plugin_enabled(profile):
@@ -1374,13 +1405,14 @@ def _steps(profile_home, profile, args):
         ("scripts", lambda a: step_scripts(profile_home, a)),
         ("roles", lambda a: step_roles(profile_home, a)),
         ("crew-dirs", lambda a: step_crew_dirs(profile_home, a)),
-        ("owner", lambda a: step_owner(profile, a)),
+        ("owner", lambda a: step_owner(profile, a, getattr(args, "owner", False))),
         ("enable", lambda a: step_enable(profile, a)),
         ("config", lambda a: step_config(profile_home, profile, a)),
         ("spill-cap", lambda a: step_spill_cap(profile_home, profile, a)),
         ("chat-kanban", lambda a: step_chat_kanban(profile, a)),
         ("menu-priority", lambda a: step_menu_priority(profile_home, profile, a)),
         ("profiles", lambda a: step_profiles(profile or "default", args.profile_prefix, a, args.no_profiles)),
+        ("other-copies", lambda a: step_other_copies(profile_home, args.profile_prefix, a)),
         ("prompt-budget", lambda a: step_prompt_budget(args.profile_prefix, a)),
         ("permissions", lambda a: step_permissions(profile_home, args.profile_prefix, a)),
         ("unit", lambda a: step_unit(profile_home, a, args.no_service)),
@@ -1431,6 +1463,8 @@ def report(profile, profile_home, args):
 def main():
     ap = argparse.ArgumentParser(description="Install the crew plugin package into a profile.")
     ap.add_argument("--profile", default=None)
+    ap.add_argument("--owner", action="store_true",
+                    help="make --profile the owner profile even when another one is recorded")
     ap.add_argument("--check", action="store_true", help="print what would change, change nothing")
     ap.add_argument("--no-service", action="store_true", help="do not write/enable the feed unit")
     ap.add_argument("--no-cron", action="store_true",
