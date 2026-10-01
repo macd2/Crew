@@ -1,0 +1,66 @@
+{
+  "roles": [
+    {
+      "name": "coordinator",
+      "purpose": "Owns every open card: heals, retries, rescopes, splits or asks the owner one question; intake and contract first.",
+      "artifact": "the card and its verdict log",
+      "proof": "card contract plus verdict log",
+      "tools_allowed": [
+        "kanban",
+        "chat"
+      ],
+      "model_class": "strong",
+      "brief": "briefs/coordinator.md",
+      "budget_tokens": 60000
+    },
+    {
+      "name": "worker",
+      "purpose": "Code, config, infra and web work; exactly one writer per card.",
+      "artifact": "files, test output, live page",
+      "proof": "files, test output, live page",
+      "tools_allowed": [
+        "shell",
+        "git",
+        "editor"
+      ],
+      "model_class": "cheap",
+      "brief": "briefs/worker.md",
+      "budget_tokens": 1500000
+    },
+    {
+      "name": "content",
+      "purpose": "Posts, reports, video, pages and all social channels.",
+      "artifact": "rendered artifact plus raw source",
+      "proof": "rendered artifact plus raw source",
+      "tools_allowed": [
+        "render",
+        "media",
+        "channel-apis"
+      ],
+      "model_class": "cheap",
+      "brief": "briefs/content.md",
+      "budget_tokens": 1500000
+    },
+    {
+      "name": "verifier",
+      "purpose": "Independent verification: runs the proof itself, never trusts the writer.",
+      "artifact": "command output, file readback, page state",
+      "proof": "command output, file readback, page state",
+      "tools_allowed": [
+        "read",
+        "run-tests",
+        "fetch"
+      ],
+      "model_class": "cheap",
+      "brief": "briefs/verifier.md",
+      "budget_tokens": 800000
+    }
+  ],
+  "default_budget_tokens": 1500000,
+  "budget_floor_tokens": 120000,
+  "max_consecutive_failures": 5,
+  "max_window_failures": 8,
+  "failure_window_calls": 25,
+  "prompt_budget_tokens": 40000,
+  "budget_note": "Every worker call carries the role prompt and tool list; install.py --check measures that first call per role from the newest kanban sessions and fails above prompt_budget_tokens. A card that hits its budget stops on 'Needs you: budget exhausted'; the writer does the work, it does not re-derive the design."
+}

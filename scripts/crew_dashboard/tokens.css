@@ -1,0 +1,43 @@
+/* The only place a colour is decided. Two inherited inputs (host background and foreground); every
+   surface, stroke and text step is the foreground at an alpha, the way the Hermes desktop builds its
+   own ladder. A host that defines --color-* (web dashboard) or --dt-* (desktop) re-skins both pages. */
+:root{
+  --crew-bg: var(--color-background, var(--dt-background, #0f1115));
+  --crew-fg: var(--color-foreground, var(--ui-base, #e8eaed));
+  --crew-font: var(--dt-font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  --crew-mono: var(--dt-font-mono, ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace);
+
+  --crew-text-1: color-mix(in srgb, var(--crew-fg) 94%, transparent);
+  --crew-text-2: color-mix(in srgb, var(--crew-fg) 74%, transparent);
+  --crew-text-3: color-mix(in srgb, var(--crew-fg) 54%, transparent);
+  --crew-text-4: color-mix(in srgb, var(--crew-fg) 36%, transparent);
+  --crew-stroke-1: color-mix(in srgb, var(--crew-fg) 14%, transparent);
+  --crew-stroke-2: color-mix(in srgb, var(--crew-fg) 8%, transparent);
+  --crew-fill-1: color-mix(in srgb, var(--crew-fg) 7%, transparent);
+  --crew-fill-2: color-mix(in srgb, var(--crew-fg) 4%, transparent);
+  --crew-fill-3: color-mix(in srgb, var(--crew-fg) 2.5%, var(--crew-bg));
+  --crew-elevated: color-mix(in srgb, var(--crew-fg) 5%, var(--crew-bg));
+  --crew-overlay: color-mix(in srgb, var(--crew-elevated) 92%, transparent);
+  --crew-shadow: color-mix(in srgb, #000 50%, transparent);
+
+  /* status tones: running and verified green, blocked/failed red, review/unverified/stale amber, ready
+     blue, done teal; todo and pending are neutral. Every state chip on both pages takes one of these. */
+  --crew-tone-running: var(--color-success, #34d399);
+  --crew-tone-blocked: var(--color-destructive, #f87171);
+  --crew-tone-review:  var(--color-warning, #fbbf24);
+  --crew-tone-ready:   #60a5fa;
+  --crew-tone-done:    var(--color-info, #2dd4bf);   /* finished work: its own tone, not the grey of "nothing" */
+  --crew-tone-neutral: var(--crew-text-3);
+
+  /* a tone as a tinted box: the wash, its outline, a stronger header wash */
+  --crew-running-fill: color-mix(in srgb, var(--crew-tone-running) 8%, var(--crew-bg));
+  --crew-running-line: color-mix(in srgb, var(--crew-tone-running) 35%, var(--crew-bg));
+  --crew-blocked-fill: color-mix(in srgb, var(--crew-tone-blocked) 8%, var(--crew-bg));
+  --crew-blocked-line: color-mix(in srgb, var(--crew-tone-blocked) 35%, var(--crew-bg));
+  --crew-review-fill:  color-mix(in srgb, var(--crew-tone-review) 8%, var(--crew-bg));
+  --crew-review-head:  color-mix(in srgb, var(--crew-tone-review) 14%, var(--crew-bg));
+  --crew-review-line:  color-mix(in srgb, var(--crew-tone-review) 35%, var(--crew-bg));
+  --crew-ready-line:   color-mix(in srgb, var(--crew-tone-ready) 35%, var(--crew-bg));
+  --crew-running-glow: color-mix(in srgb, var(--crew-tone-running) 55%, transparent);
+  --crew-running-halo: color-mix(in srgb, var(--crew-tone-running) 35%, transparent);
+}

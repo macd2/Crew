@@ -1,0 +1,25 @@
+name: crew
+version: 0.6.0
+manifest_version: 2
+api_version: 1
+author: macd2
+license: Apache-2.0
+homepage: https://crew.forgecoreai.com
+tags: [kanban, agents, coordinator, verification, multi-agent, workflow]
+description: >
+  Crew turns one chat message into verified work on the Hermes kanban board. /crew <ask> asks only what
+  is missing, writes a card contract (goal, artifact, done-when, proof command, token budget) and hands it
+  to a coordinator that owns the card until its proof command exits 0. One writer per card, an
+  independent verifier that runs the proof itself, a per-card token budget as a hard stop, and a local
+  dashboard of every card, run and step. /crew-status, /crew-graph and /crew-stop are plain commands with
+  no model call; /crew-diagnose explains every stuck card.
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  - post_api_request
+  - api_request_error
+  - on_kanban_dispatch_tick
+# The four skills (crew, crew-verifier, crew-role-worker, crew-role-content) are registered at
+# runtime by ctx.register_skill and shipped as skills/<name>/SKILL.md; plugin.yaml has no field for
+# them, so they are listed here as a comment rather than as an ignored key.

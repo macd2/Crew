@@ -1,0 +1,15 @@
+.DS_Store
+*.log
+*.tmp
+__pycache__/
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+*.pyc
+.venv/
+.pytest_cache/
+
+# runtime state the dashboard writes (cleared notifications)
+crew/attention_acks.json
