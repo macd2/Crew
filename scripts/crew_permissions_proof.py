@@ -29,7 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import crew_card  # noqa: E402 - the owner profile
-INSTALL = os.path.join(os.path.dirname(HERE), "install.py")   # the package root, one level up
+INSTALL = os.path.join(crew_card.package_dir() or os.path.dirname(HERE), "install.py")
 
 spec = importlib.util.spec_from_file_location("crew_install_under_test", INSTALL)
 CI = importlib.util.module_from_spec(spec)

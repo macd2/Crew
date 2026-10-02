@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_card  # noqa: E402
+PKG = crew_card.package_dir() or os.path.dirname(HERE)   # resolved before the proof points HERMES_HOME at its scratch home
 import crew_coordinator_proof as cp  # noqa: E402
 import crew_proof_board  # noqa: E402
 
@@ -66,7 +67,7 @@ def lines(cid):
 
 
 def load_plugin():
-    spec = importlib.util.spec_from_file_location("crew_plugin_two_stage_proof", os.path.join(os.path.dirname(HERE), "__init__.py"))
+    spec = importlib.util.spec_from_file_location("crew_plugin_two_stage_proof", os.path.join(PKG, "__init__.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

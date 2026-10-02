@@ -17,6 +17,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import crew_card  # noqa: E402 - the package checkout
+
 CHECKS = []
 
 
@@ -52,7 +55,7 @@ def card_done_when(card):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--card", required=True)
-    ap.add_argument("--package", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ap.add_argument("--package", default=crew_card.package_dir() or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 

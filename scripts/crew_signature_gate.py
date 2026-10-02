@@ -38,8 +38,10 @@ def package_root():
         if os.path.isfile(os.path.join(d, "plugin.yaml")):
             return d
         parent = os.path.dirname(d)
-        if parent == d:
-            return os.path.dirname(HERE)
+        if parent == d:   # an installed copy in <profile>/scripts: the package install.py ran from
+            sys.path.insert(0, HERE)
+            import crew_card
+            return crew_card.package_dir() or os.path.dirname(HERE)
         d = parent
 
 

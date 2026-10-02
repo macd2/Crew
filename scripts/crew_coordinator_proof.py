@@ -7,19 +7,17 @@ keeps the real profile home) - the live board is never opened. The model call is
 answers from a queue file, so each decision is exactly the one the proof scripted and the number of model
 calls is countable.
 
+Every `hermes kanban` call costs a CLI start (~7s), so this keeps only what needs the real kernel. The rules
+with no kernel side (retry cap, owner stop, a model that cannot answer, close needs a PASS line, abandon needs
+the owner's words, the mechanical remedy) are unit tests in tests/test_crew_coordinator.py.
+
   A  first pass: the cursor is initialised at the newest event and nothing is replayed
   B  a blocked crew card gets a `crew_decision` (retry) carrying the triggering event id; the fix is written
      into the card body and the card is back in the queue with the kernel's block counter reset
   C  the same card blocked again lands in `blocked` (not `triage`): the counter reset held
-  D  the third failure is NOT sent to the model: the loop's retry cap turns it into ask_owner
-  E  an owner stop wins: an archived/stopped card gets no decision and no model call
-  F  a model that cannot answer is asked twice and then the owner is asked, never a silent loop
   G  a card the kernel breaker parked untyped is typed needs_input in place by ask_owner
   H  a card in `triage` (a second same-kind block) is lifted by a retry
-  I  close: refused without a PASS line (becomes verify, runs the proof), accepted with one
-  J  abandon without the owner's own words becomes ask_owner
   K  split opens children under a close-out and archives the original
-  M  the mechanical remedy (a block whose proof passes now) is applied before any model call
   L  the lock: a live pass blocks a second one, a dead pid's lock is taken over
   N  the close rule: a card closed from the CLI (`complete --force`) with no PASS line is recorded as an
      owner_close decision, once and with no model call; one closed on a PASS line is left alone
@@ -263,57 +261,6 @@ def main():
     check("C: a rescope rewrites the Done when line and numbers its fix 2",
           "Done when: the file exists and is non-empty" in body and "Coordinator fix 2:" in body, body[-160:])
 
-    # ---- D: the third failure never reaches the model
-    worker_blocks(cid_a, "still failing the same way")
-    calls_before = model_calls()
-    queue(json.dumps({"decision": "retry", "fix": "THIS MUST NOT BE ASKED"}))
-    coordinator()
-    ds = decisions(cid_a)
-    check("D: the third failure is an ask_owner decision made without a model call",
-          ds[-1].get("decision") == "ask_owner" and model_calls() == calls_before, json.dumps(ds[-1])[:110])
-    check("D: the question names the retry count", "retried 2 times" in str(ds[-1].get("question", "")),
-          ds[-1].get("question", ""))
-    comments = rows("select body from task_comments where task_id = ?", (cid_a,))
-    check("D: the owner's question is on the card as a `Needs you:` comment",
-          any(c["body"].startswith("Needs you:") for c in comments), str(comments[-1:])[:100])
-    check("D: the card stays blocked for the owner", card(cid_a)["status"] == "blocked", card(cid_a)["status"])
-    calls_before = model_calls()
-    coordinator()
-    coordinator("--since", "0")
-    check("D: waiting for the owner, a later pass does nothing more", len(decisions(cid_a)) == 3 and
-          model_calls() == calls_before, "%d decisions" % len(decisions(cid_a)))
-
-    # ---- E: the owner's stop wins
-    cid_e = new_card("proof card E")
-    worker_blocks(cid_e, "whatever")
-    cli("archive", cid_e)
-    sql("insert into task_events (task_id, run_id, kind, payload, created_at) values (?, null, 'stopped', '{}', ?)",
-        (cid_e, int(time.time())))
-    calls_before = model_calls()
-    queue(json.dumps({"decision": "retry", "fix": "MUST NOT RUN"}))
-    coordinator()
-    check("E: a stopped card gets no decision and no model call", not decisions(cid_e) and
-          model_calls() == calls_before, "")
-
-    # ---- F: a model that cannot answer
-    cid_f = new_card("proof card F")
-    worker_blocks(cid_f, "flaky")
-    calls_before = model_calls()
-    queue("no json at all", "still nothing")
-    rep = coordinator()
-    ds = decisions(cid_f)
-    check("F: two unusable answers are one recorded error and the cursor is held",
-          len(ds) == 1 and ds[0].get("decision") == "error" and model_calls() - calls_before == 2,
-          json.dumps(ds)[:100])
-    held = cursor()
-    queue("garbage", "more garbage")
-    coordinator()
-    ds = decisions(cid_f)
-    check("F: the second failed pass asks the owner instead of looping",
-          [d.get("decision") for d in ds] == ["error", "ask_owner"], [d.get("decision") for d in ds])
-    coordinator()
-    check("F: then the cursor moves on", cursor() >= newest_event(cid_f, "blocked"), cursor())
-
     # ---- G: an untyped breaker block is typed in place
     cid_g = new_card("proof card G")
     worker_blocks(cid_g, "parked by the breaker")
@@ -336,35 +283,6 @@ def main():
     check("H: a retry lifts the card out of triage", card(cid_h)["status"] in ("ready", "todo") and
           decisions(cid_h)[-1].get("applied") is True, card(cid_h)["status"])
 
-    # ---- I: close needs a PASS line
-    cid_i = new_card("proof card I", proof="sh -c 'exit 0'")
-    stamp_healed(cid_i)
-    worker_blocks(cid_i, "waiting")
-    queue(json.dumps({"decision": "close", "why": "the work looks done"}))
-    coordinator()
-    ds = decisions(cid_i)
-    check("I: close without a PASS line runs the proof, then closes on its PASS",
-          ds and ds[-1].get("decision") == "close" and card(cid_i)["status"] == "done",
-          "%s %s" % (card(cid_i)["status"], json.dumps(ds[-1:])[:80]))
-    cid_i2 = new_card("proof card I2", proof="sh -c 'exit 3'")
-    worker_blocks(cid_i2, "waiting")
-    queue(json.dumps({"decision": "verify"}), json.dumps({"decision": "verify"}))
-    coordinator()
-    ds = decisions(cid_i2)
-    check("I: a failing proof is not a close: the owner is asked with the failure",
-          ds and ds[-1].get("decision") == "ask_owner" and card(cid_i2)["status"] == "blocked",
-          json.dumps(ds[-1:])[:110])
-
-    # ---- J: abandon needs the owner's words
-    cid_j = new_card("proof card J")
-    worker_blocks(cid_j, "hopeless")
-    queue(json.dumps({"decision": "abandon", "why": "it looks pointless"}))
-    coordinator()
-    ds = decisions(cid_j)
-    check("J: abandon with no owner word becomes ask_owner and the card is not archived",
-          ds and ds[-1].get("decision") == "ask_owner" and card(cid_j)["status"] == "blocked",
-          json.dumps(ds[-1:])[:100])
-
     # ---- K: split
     cid_k = new_card("proof card K")
     worker_blocks(cid_k, "too big")
@@ -379,17 +297,6 @@ def main():
     check("K: a split opens the children and archives the original",
           ds and ds[-1].get("decision") == "split" and ds[-1].get("applied") is True and len(kids) == 2 and
           card(cid_k)["status"] == "archived", "%s %d kids" % (card(cid_k)["status"], len(kids)))
-
-    # ---- M: the mechanical remedy comes first
-    cid_m = new_card("proof card M", proof="sh -c 'exit 0'")
-    worker_blocks(cid_m, "stale block")
-    calls_before = model_calls()
-    queue(json.dumps({"decision": "retry", "fix": "MUST NOT BE ASKED"}))
-    coordinator()
-    check("M: a block whose proof passes now is lifted by the remedy, with no model call and no decision",
-          card(cid_m)["status"] in ("ready", "todo") and model_calls() == calls_before and not decisions(cid_m)
-          and not card(cid_m)["block_recurrences"], "%s recurrences=%s" % (card(cid_m)["status"],
-                                                                        card(cid_m)["block_recurrences"]))
 
     # ---- L: the lock
     lock = os.path.join(HOME, "crew", "coordinator.lock")
@@ -473,8 +380,8 @@ def main():
     if FAILS:
         print("PROOF FAIL: %d check(s) failed: %s" % (len(FAILS), ", ".join(FAILS)))
         return 1
-    print("PROOF OK: the coordinator loop decides and applies every verb on a scratch board, records each "
-          "decision with its triggering event, caps its own retries at two and never loops on a silent model")
+    print("PROOF OK: the coordinator's verbs land on the real kernel - retry, rescope, ask_owner, split, "
+          "triage lift, owner_close and the two-FAIL hand-back - each recorded with its triggering event")
     return 0
 
 

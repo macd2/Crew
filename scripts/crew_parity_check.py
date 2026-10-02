@@ -15,8 +15,11 @@ import json
 import os
 import sys
 
-# The package checkout this script sits in (scripts/..), or CREW_PACKAGE; the profiles it was installed into.
-PACKAGE = os.environ.get("CREW_PACKAGE") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import crew_card  # noqa: E402
+
+# The package checkout (CREW_PACKAGE, else crew_card.package_dir); the profiles it was installed into.
+PACKAGE = os.environ.get("CREW_PACKAGE") or crew_card.package_dir() or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILES = os.path.join(os.path.expanduser("~/.hermes"), "profiles")
 # Where each shipped file lands inside a profile, read from the installer so the two can never
 # disagree about what "installed" means.

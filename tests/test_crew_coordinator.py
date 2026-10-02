@@ -692,5 +692,81 @@ class HasWorkTests(unittest.TestCase):
             self.assertTrue(cc.has_work())
 
 
+class ApplyDecisionTests(unittest.TestCase):
+    """resolve + apply_decision: which board verbs each decision issues. The verbs are recorded, not run; that the
+    kernel honours them is scripts/crew_coordinator_proof.py."""
+
+    def setUp(self):
+        build_db()
+        self.cli = []
+        self.answers = []
+        self.ctx = cc.Ctx(_DB, None, dry=False, say=lambda *_: None,
+                          decider=lambda ctx, facts: (self.answers.pop(0) if self.answers else "no answer", 0))
+        for p in (mock.patch.object(cc, "kanban", lambda *a, **k: (self.cli.append(list(a)) or (0, "ok"))),
+                  mock.patch.object(cc, "worker_log_tail", lambda cid: ""),
+                  mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": _DB})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def card(self, cid="t_1", **kw):
+        add_card(cid, **kw)
+        return cc.get_card(self.ctx, cid)
+
+    def test_close_without_a_pass_line_runs_the_proof_and_closes_on_its_pass(self):
+        card = self.card()
+        self.answers = ['{"decision": "close", "why": "looks done"}']
+        with mock.patch.object(cc, "pass_line", lambda cid: False), \
+                mock.patch.object(cc, "run_verdict", return_value=(0, "rc=0")) as run:
+            dec, source, pending = cc.resolve(self.ctx, card, [], {"id": 1})
+        run.assert_called_once()
+        self.assertEqual(("close", "verify", False), (dec["decision"], source, pending))
+
+    def test_a_failing_proof_is_not_a_close_the_owner_is_asked_with_the_failure(self):
+        card = self.card()
+        self.answers = ['{"decision": "close", "why": "looks done"}', '{"decision": "close", "why": "still"}']
+        with mock.patch.object(cc, "pass_line", lambda cid: False), \
+                mock.patch.object(cc, "run_verdict", return_value=(3, "proof command: exit 3")):
+            dec, source, _ = cc.resolve(self.ctx, card, [], {"id": 1})
+        self.assertEqual(("ask_owner", "verify"), (dec["decision"], source))
+        self.assertIn("proof command: exit 3", dec["question"])
+
+    def test_abandon_without_the_owners_words_asks_and_archives_nothing(self):
+        card = self.card()
+        dec = {"decision": "abandon", "why": "it looks pointless"}
+        ok, _ = cc.apply_decision(self.ctx, card, [], dec)
+        self.assertTrue(ok)
+        self.assertEqual("ask_owner", dec["decision"])
+        self.assertNotIn("archive", [c[0] for c in self.cli])
+
+    def test_abandon_after_the_owner_scrapped_it_archives(self):
+        card = self.card()
+        add_event("t_1", "brief", {"text": "scrap this, we cancelled the launch"})
+        ok, _ = cc.apply_decision(self.ctx, card, [], {"decision": "abandon", "why": "owner scrapped it"})
+        self.assertTrue(ok)
+        self.assertEqual(["archive", "t_1"], self.cli[-1])
+
+    def test_split_opens_the_children_and_archives_the_original(self):
+        card = self.card()
+        plan = {"children": [{"id": "t_a"}, {"id": "t_b"}], "closeout": {"id": "t_c"}}
+        with mock.patch.object(cc.crew_card, "run_plan", return_value=plan) as run:
+            ok, out = cc.apply_decision(self.ctx, card, [], {"decision": "split", "why": "two parts",
+                                                             "children": [{"title": "a"}, {"title": "b"}]})
+        self.assertTrue(ok)
+        self.assertEqual(2, len(run.call_args[0][0]["children"]))
+        self.assertEqual(["archive", "t_1"], self.cli[-1])
+        self.assertIn("t_a, t_b", out)
+
+    def test_ask_owner_types_an_untyped_block_and_a_held_ready_card_but_not_a_typed_block(self):
+        for cid, status, kind, blocks in (("t_u", "blocked", None, True), ("t_r", "ready", None, True),
+                                          ("t_t", "blocked", "transient", False)):
+            self.cli.clear()
+            card = self.card(cid, status=status, block_kind=kind)
+            cc.apply_ask_owner(self.ctx, card, "retry or drop?")
+            verbs = [c[:3] for c in self.cli]
+            self.assertEqual(blocks, ["block", cid, "--kind"] in verbs, (cid, verbs))
+            self.assertEqual("comment", self.cli[-1][0])
+            self.assertTrue(self.cli[-1][2].startswith("Needs you: retry or drop?"))
+
+
 if __name__ == "__main__":
     unittest.main()

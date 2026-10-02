@@ -367,12 +367,12 @@ def board_page(include_all=False):
     data = board_data(include_all)
     css = CG.dashboard_asset("tokens.css", "crew.css")
     if data.get("error"):
-        return ("<!doctype html><meta charset=utf-8><title>crew board</title><style>%s</style>"
+        return ("<!doctype html><meta charset=utf-8><title>crew board</title>%s<style>%s</style>"
                 "<body class=page-board><main>crew board: cannot read the board (%s)</main>"
-                % (css, esc(data["error"])))
+                % (CG.favicon_link(), css, esc(data["error"])))
     return ("<!doctype html><html><head><meta charset=utf-8>"
             "<meta name=viewport content='width=device-width, initial-scale=1'><title>Crew</title>"
-            "<style>%s</style></head><body class=page-board>"
+            "%s<style>%s</style></head><body class=page-board>"
             # One header line, the information the board always carried (owner, 2026-10-01: "use the info we
             # had before but in the nice design"): the LIVE badge (its green dot pulses while the server
             # answers the poll, amber once a poll fails), the card count, how many are working now,
@@ -394,7 +394,7 @@ def board_page(include_all=False):
             # to come after them: a `draw(INIT)` placed before board.js ran with no helpers defined
             # yet, and the thrown error left the board empty.
             "<script>var INIT=%s;%s;draw(INIT);</script></body></html>"
-            % (css, cards_word(data.get("cards")), live_word(data.get("live")),
+            % (CG.favicon_link(), css, cards_word(data.get("cards")), live_word(data.get("live")),
                board_counts(data.get("counts")), notes_hint(data.get("attention")),
                BELL_SVG, notes_total(data.get("attention")), attention_head(data.get("attention")),
                esc(os.uname().nodename), esc(CG.crew_card.dashboard_url()), json.dumps(data),

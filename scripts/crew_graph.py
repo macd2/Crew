@@ -23,6 +23,7 @@ Outputs:
 """
 
 import argparse
+import base64
 import html as _html
 import json
 import os
@@ -558,6 +559,18 @@ def dashboard_asset(*names):
         with open(os.path.join(DASH_DIR, name), encoding="utf-8") as fh:
             out.append(fh.read())
     return "\n".join(out)
+
+
+def favicon_link():
+    """The tab icon as an inline <link>: the logo mark with no background, shipped beside the CSS and
+    embedded like it, so the page stays one self-contained document. The SVG carries the mark for a
+    dark and for a light tab (dev/make_favicon.py). A missing file costs the icon, never the page."""
+    try:
+        with open(os.path.join(DASH_DIR, "favicon.svg"), "rb") as fh:
+            data = base64.b64encode(fh.read()).decode("ascii")
+    except OSError:
+        return ""
+    return '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,%s">' % data
 
 
 def profile_homes():
@@ -2087,6 +2100,7 @@ def render_html(graph, json_filename):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
+{favicon}
 <style>{css}</style>
 </head>
 <body class="page-card" data-card="%(card_id)s">
@@ -2175,7 +2189,7 @@ def render_html(graph, json_filename):
 </script>
 </body>
 </html>
-""".format(title=title, css=css, js=js, **_tok_fields(graph.get("tokens")),
+""".format(title=title, favicon=favicon_link(), css=css, js=js, **_tok_fields(graph.get("tokens")),
                **_brief_fields(graph))
 
     html_doc = html_doc.replace("%(card_id)s", _html.escape(card_id, quote=True))

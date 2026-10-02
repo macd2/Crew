@@ -23,10 +23,10 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import crew_proof_board as board  # noqa: E402
 import crew_card  # noqa: E402 - the owner profile and the base home
+PKG = crew_card.package_dir() or os.path.dirname(HERE)
 
 CHAT = "stream:Kanban|PROBE intake create"
 ASK = "put up a status page for the on-call team"

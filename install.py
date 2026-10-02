@@ -70,7 +70,14 @@ SCRIPT_FILES = ["kanban_zulip_feed.py", "crew_graph.py",
                 "crew_permissions_proof.py",
                 # the dashboard's CSS/JS, which crew_graph.py and crew_graph_serve.py inline
                 "crew_dashboard/tokens.css", "crew_dashboard/crew.css", "crew_dashboard/lib.js",
-                "crew_dashboard/board.js", "crew_dashboard/card.js"]
+                "crew_dashboard/board.js", "crew_dashboard/card.js",
+                "crew_dashboard/favicon.svg"]
+# Scripts the package once shipped and has since deleted. A copy left in a profile still runs: the
+# nightly runner globs the profile's scripts dir, so a stale proof fails there forever.
+RETIRED_SCRIPT_FILES = ["crew_follow.py", "crew_follow_proof.py", "crew_observer.py", "crew_observer.sh",
+                        "crew_repeat_escalation_proof.py", "crew_triage.py", "crew_unblock.py",
+                        "crew_unstale.py", "crew_unstale_proof.py",
+                        "crew_dashboard/favicon.png"]
 ROLE_FILES = ["roles.json", "briefs/coordinator.md", "briefs/worker.md", "briefs/content.md",
               "briefs/verifier.md"]
 
@@ -147,19 +154,31 @@ def step_plugin(profile_home, apply):
     return "CHANGED", "plugin crew copied into %s" % dst
 
 
+def _retired_scripts(dst):
+    return [r for r in RETIRED_SCRIPT_FILES if os.path.exists(os.path.join(dst, r))]
+
+
+def _scripts_ok(dst):
+    return (os.path.isdir(dst) and _tree_ok(os.path.join(SRC_DIR, "scripts"), dst, SCRIPT_FILES)
+            and not _retired_scripts(dst))
+
+
 def step_scripts(profile_home, apply):
     src = os.path.join(SRC_DIR, "scripts")
     dst = os.path.join(profile_home, "scripts")
-    if os.path.isdir(dst) and _tree_ok(src, dst, SCRIPT_FILES):
+    if _scripts_ok(dst):
         return "OK", "scripts (up to date)"
+    retired = _retired_scripts(dst)
     if not apply:
-        return "CHANGED", "scripts -> copy into %s" % dst
+        return "CHANGED", "scripts -> copy into %s%s" % (dst, ", remove " + ", ".join(retired) if retired else "")
     os.makedirs(dst, exist_ok=True)
     for rel in SCRIPT_FILES:
         d = os.path.join(dst, rel)
         os.makedirs(os.path.dirname(d), exist_ok=True)
         shutil.copy2(os.path.join(src, rel), d)
-    return "CHANGED", "scripts copied into %s" % dst
+    for rel in retired:
+        os.remove(os.path.join(dst, rel))
+    return "CHANGED", "scripts copied into %s%s" % (dst, ", removed " + ", ".join(retired) if retired else "")
 
 
 def step_roles(profile_home, apply):
@@ -1359,7 +1378,7 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             # package root, so its files are compared against plugins/crew/ in the profile.
             _tree_ok(str(SRC_DIR), os.path.join(home, "plugins", "crew"), PLUGIN_FILES)
             and os.path.exists(os.path.join(home, "scripts", "crew_card.py"))
-            and _tree_ok(str(SRC_DIR / "scripts"), os.path.join(home, "scripts"), SCRIPT_FILES)
+            and _scripts_ok(os.path.join(home, "scripts"))
             and _tree_ok(str(SRC_DIR / "roles"), os.path.join(home, "roles", "crew"), ROLE_FILES)
             and not any(role_skills_todo(home, tpl, resolve_profile_home(source_profile))))
         if soul_need or settings_need or provision_need:

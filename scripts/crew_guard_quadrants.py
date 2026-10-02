@@ -20,9 +20,10 @@ import sys
 import tempfile
 import time
 
-PLUGIN = os.environ.get("CREW_PLUGIN", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                                    "__init__.py"))
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import crew_card  # noqa: E402 - the package checkout
+PLUGIN = os.environ.get("CREW_PLUGIN", os.path.join(crew_card.package_dir() or os.path.dirname(HERE), "__init__.py"))
 CARD = "t_guard_quadrants"
 PROOF = "sh -c 'exit 0'"
 BODY = ("Role: worker\nCoordinator: crew-coordinator\nBudget: 1000 tokens\n\nGOAL: prove the guard\n\n"
