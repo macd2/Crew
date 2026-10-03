@@ -2,7 +2,16 @@
 """Installer for the crew plugin package (self-contained, idempotent, stdlib only).
 
 Usage:
-  python3 install.py [--profile NAME] [--check] [--no-service] [--no-cron]
+  python3 install.py [--profile NAME] [--check] [--no-service] [--no-cron] [--no-profiles]
+                     [--nightly-proofs [--proofs-deliver TARGET]]
+                     [--chat-kanban] [--telegram-menu] [--spill-cap]
+
+The installer never prompts. What it does by default: copies the plugin (scripts included) into the
+profile, the role profiles, the roles file, the local dashboard unit, the config keys crew reads. Everything
+that reaches beyond crew's own files is a flag: --nightly-proofs (cron),
+--chat-kanban (kanban toolset on zulip/telegram), --telegram-menu (command menu order), --spill-cap
+(hooks.output_spill.max_chars on the installing profile). It never approves a shell hook: consent is
+Hermes's own (the TTY prompt), and the installer only reports what is still missing.
 
 --check changes nothing: it prints exactly what would change and exits 0 when the
 package is complete, 1 when something is missing or a role's first-call prompt is over
@@ -21,17 +30,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:                      # the runtime takes the same lock around its own approvals
-    import fcntl
-except ImportError:       # pragma: no cover - non-POSIX
-    fcntl = None
-
 SRC_DIR = Path(__file__).resolve().parent          # the libs/crew directory (source of truth)
-UNIT_NAME = "kanban-zulip-feed.service"
-# Destinations the feed stays quiet in: `<channel>` for a whole channel, `<channel>|<topic>` for one
-# topic. The owner scopes silence per topic, so the digest topic is muted while the board still gets
-# its card messages (owner, 2026-09-29: "only for the kanban overview topic for now").
-FEED_MUTE = "Kanban|📌 overview"
 UNIT_GRAPH_NAME = "crew-graph-http.service"
 GRAPH_PORT = 8799
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -39,45 +38,39 @@ UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 # self-heal ran crew_heal.py every 5 minutes (now a library the loop calls); the weekly observer was a
 # role of its own whose rule proposals nobody read (removed with the owner surface, spec step 9).
 OLD_CRON_NAMES = ("crew self-heal", "Crew observer (weekly)")
-# the proofs are the acceptance evidence for the plugin: they run every night, and the job speaks
-# only when one of them fails
+# the proofs are the acceptance evidence for the plugin: with --nightly-proofs they run every night, and the
+# job speaks only when one of them fails. Delivery is the local cron output unless --proofs-deliver names a target.
 CRON_PROOFS_NAME = "Crew proofs (nightly)"
 CRON_PROOFS_SCHEDULE = "0 3 * * *"
-CRON_PROOFS_DELIVER = "zulip:stream:Kanban|crew-alerts"
+CRON_PROOFS_DELIVER = "local"
+# Hermes cron only runs a script that sits inside HERMES_HOME/scripts, so the one file crew keeps there is this
+# shim; the proofs themselves run from the plugin's own copy.
+PROOFS_SHIM = "crew_proofs.sh"
+PROOFS_SHIM_TEXT = (
+    "#!/bin/sh\n"
+    "# Written by the crew installer (--nightly-proofs). Hermes cron runs scripts from HERMES_HOME/scripts only,\n"
+    "# so this hands over to the plugin's own copy of the proof runner.\n"
+    "exec python3 \"$(dirname \"$0\")/../plugins/crew/scripts/crew_proofs.py\" --quiet \"$@\"\n")
 
-PLUGIN_FILES = ["plugin.yaml", "__init__.py", "skills/crew-verifier/SKILL.md",
-                "skills/crew-role-worker/SKILL.md", "skills/crew-role-content/SKILL.md",
-                "skills/crew/SKILL.md", "skills/crew-diagnose/SKILL.md"]
-SCRIPT_FILES = ["kanban_zulip_feed.py", "crew_graph.py",
-                "crew_proofs.py", "crew_proofs.sh",
-                "crew_graph_serve.py", "crew_card.py", "crew_tools_audit.py",
-                "crew_graph_flow_check.py", "crew_panel_click_check.py", "crew_ws.py",
-                "crew_guard_quadrants.py", "crew_tokens_section_proof.py",
-                "crew_notify_proof.py", "crew_role_platforms_proof.py",
-                "crew_situation_box_proof.py", "crew_spin_box_proof.py", "crew_entry_proof.py", "crew_top_area_proof.py", "crew_card_page_proof.py", "crew_brief_proof.py", "crew_route_pin_proof.py", "crew_quota_wall_proof.py",
-        "crew_origin_loop_proof.py",
-        "crew_dashboard_proof.py", "crew_handoff_proof.py", "crew_handoff.py", "crew_route_pick.py", "crew_parity_check.py", "crew_heal.py", "crew_heal_proof.py", "crew_coordinator.py", "crew_coordinator_proof.py", "crew_two_stage_proof.py", "crew_origin_open_proof.py", "crew_proof_board.py", "crew_result.py", "crew_probe_skip_proof.py", "crew_live_walk.py", "crew_child_link_proof.py", "crew_terminal_window_proof.py", "crew_zulip_route_proof.py",
-                "crew_intake_proof.py", "crew_intake_create_proof.py", "crew_route_floor_proof.py", "crew_option_commands_proof.py",
-                "crew_signature_gate.py", "crew_diagnose.py", "crew_diagnose_proof.py",
-                # the nightly job runs crew_proofs.sh inside the profile's own scripts dir, so a proof
-                # missing from this list never runs at night: these five were the gap
-                "crew_attention_proof.py", "kanban_feed_mute_proof.py",
-                "kanban_feed_mute_live_proof.py", "kanban_move_notice_proof.py",
-                "kanban_overview_dedupe_proof.py",
-                # the one-command stop, and the proof that pins it staying down
-                "crew_stop.py", "crew_stop_proof.py",
-                # the installer's own gate: every crew home's shell-hook consent
-                "crew_permissions_proof.py",
-                # the dashboard's CSS/JS, which crew_graph.py and crew_graph_serve.py inline
-                "crew_dashboard/tokens.css", "crew_dashboard/crew.css", "crew_dashboard/lib.js",
-                "crew_dashboard/board.js", "crew_dashboard/card.js",
-                "crew_dashboard/favicon.svg"]
-# Scripts the package once shipped and has since deleted. A copy left in a profile still runs: the
-# nightly runner globs the profile's scripts dir, so a stale proof fails there forever.
+# Everything in the package's scripts/ ships: one list derived from the tree, so a new script can never be left
+# out of the installed copy (crew_safety.py once was, and every importer crashed). Bytecode never ships.
+SCRIPT_FILES = sorted(str(p.relative_to(SRC_DIR / "scripts")) for p in (SRC_DIR / "scripts").rglob("*")
+                      if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
+# Scripts the package once shipped and has since deleted.
 RETIRED_SCRIPT_FILES = ["crew_follow.py", "crew_follow_proof.py", "crew_observer.py", "crew_observer.sh",
                         "crew_repeat_escalation_proof.py", "crew_triage.py", "crew_unblock.py",
                         "crew_unstale.py", "crew_unstale_proof.py",
-                        "crew_dashboard/favicon.png"]
+                        "crew_dashboard/favicon.png", "kanban_zulip_feed.py", "kanban_zulip_columns.py",
+                        "kanban_feed_mute_proof.py", "kanban_feed_mute_live_proof.py",
+                        "kanban_move_notice_proof.py", "kanban_overview_dedupe_proof.py",
+                        "crew_zulip_route_proof.py"]
+# The plugin copy in a profile is the package's plugin files plus its scripts/: everything crew runs is
+# loaded from <profile>/plugins/crew/ and never from <profile>/scripts/. `hermes plugins install` clones the
+# whole repo into the same place, so the layout is the same in both install modes.
+PLUGIN_FILES = (["plugin.yaml", "__init__.py", "skills/crew-verifier/SKILL.md",
+                 "skills/crew-role-worker/SKILL.md", "skills/crew-role-content/SKILL.md",
+                 "skills/crew/SKILL.md", "skills/crew-diagnose/SKILL.md"]
+                + ["scripts/" + rel for rel in SCRIPT_FILES])
 ROLE_FILES = ["roles.json", "briefs/coordinator.md", "briefs/worker.md", "briefs/content.md",
               "briefs/verifier.md"]
 
@@ -105,15 +98,73 @@ def profile_flag(name):
     return [] if not name or name == "default" else ["-p", name]
 
 
-def _env():
-    env = dict(os.environ)
-    env.setdefault("HERMES_ACCEPT_HOOKS", "1")
-    return env
-
-
 def h(profile, *args):
+    if args[:2] == ("config", "set"):
+        _CFG_CACHE.pop(profile or "", None)   # a write makes the cached reads of that profile stale
     return subprocess.run([hermes_bin(), *profile_flag(profile), *args],
-                          capture_output=True, text=True, timeout=240, env=_env())
+                          capture_output=True, text=True, timeout=240)
+
+
+_REAL_H = h
+
+# Reads go through Hermes's own `get_config_value` (what `hermes config get` prints), but many keys in ONE process:
+# every `hermes ...` launch costs ~4 s (it loads the secrets provider and the plugins), an in-process read ~0.4 s,
+# and the installer reads far more than it writes (2026-10-03: --check took ~85 s). Writes stay `hermes config set`.
+_CFG_CACHE = {}
+_CFG_READER = r"""
+import contextlib, io, json, os, sys
+sys.path.insert(0, sys.argv[1])
+from hermes_cli.config import get_config_value
+out = {}
+for key in json.loads(sys.argv[2]):
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            get_config_value(key)
+        out[key] = [0, buf.getvalue()]
+    except SystemExit as exc:
+        out[key] = [exc.code if isinstance(exc.code, int) else 1, buf.getvalue()]
+    except Exception:
+        out[key] = [1, ""]
+print(json.dumps(out))
+"""
+
+
+def _hermes_python():
+    root = os.path.dirname(os.path.dirname(os.path.realpath(hermes_bin())))
+    for cand in (os.path.join(Path.home(), ".hermes", "hermes-agent"), root):
+        for d in ("venv", ".venv"):
+            py = os.path.join(cand, d, "bin", "python")
+            if os.path.exists(py):
+                return py, cand
+    return None, None
+
+
+def _cfg_raw_many(profile, keys):
+    """{key: (rc, stdout)} as `hermes config get` would answer, read in one in-process call (cached per profile);
+    falls back to one CLI call per key when Hermes's python cannot be found or the reader fails."""
+    if h is not _REAL_H:   # a replaced runner (a test's fake, a wrapper) owns every read, uncached
+        return {k: (lambda r: (r.returncode, r.stdout))(h(profile, "config", "get", k)) for k in keys}
+    cache = _CFG_CACHE.setdefault(profile or "", {})
+    want = [k for k in keys if k not in cache]
+    if want:
+        py, root = _hermes_python()
+        got = None
+        if py:
+            env = dict(os.environ, HERMES_HOME=resolve_profile_home(profile))
+            try:
+                r = subprocess.run([py, "-c", _CFG_READER, root, json.dumps(want)], capture_output=True,
+                                   text=True, timeout=60, env=env)
+                got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else None
+            except (OSError, ValueError, subprocess.SubprocessError, IndexError):
+                got = None
+        for k in want:
+            if got is not None and k in got:
+                cache[k] = (got[k][0], got[k][1])
+            else:
+                r = h(profile, "config", "get", k)
+                cache[k] = (r.returncode, r.stdout)
+    return {k: cache[k] for k in keys}
 
 
 def _read(path):
@@ -138,7 +189,10 @@ def _backup_dir(profile_home):
 
 
 def step_plugin(profile_home, apply):
+    """The plugin copy of a profile, scripts/ included: every file crew runs is loaded from here."""
     dst = os.path.join(profile_home, "plugins", "crew")
+    if os.path.realpath(dst) == os.path.realpath(SRC_DIR):
+        return "OK", "plugin crew (this checkout is the plugin dir: `hermes plugins install` mode)"
     if os.path.isdir(dst) and _tree_ok(SRC_DIR, dst, PLUGIN_FILES):
         return "OK", "plugin crew (up to date)"
     if not apply:
@@ -154,31 +208,59 @@ def step_plugin(profile_home, apply):
     return "CHANGED", "plugin crew copied into %s" % dst
 
 
-def _retired_scripts(dst):
-    return [r for r in RETIRED_SCRIPT_FILES if os.path.exists(os.path.join(dst, r))]
+# ----------------------------------------------------------------- stale script copies
+# Earlier installs copied ~60 crew scripts into <profile>/scripts/. Everything now runs from the plugin's own
+# copy, so those files are dead weight and, worse, a second version of the code that could be picked up by
+# accident. The installer removes exactly the files its own lists name, prints each one, and touches
+# nothing else in that directory (the owner's own scripts live there too).
+
+def _stale_scripts(dst):
+    """Relative names under <profile>/scripts/ that a crew install put there. crew_proofs.sh is not one of them:
+    it is the cron shim (see step_proofs_shim)."""
+    names = [r for r in SCRIPT_FILES + RETIRED_SCRIPT_FILES if r != PROOFS_SHIM]
+    return [r for r in names if os.path.isfile(os.path.join(dst, r))]
 
 
-def _scripts_ok(dst):
-    return (os.path.isdir(dst) and _tree_ok(os.path.join(SRC_DIR, "scripts"), dst, SCRIPT_FILES)
-            and not _retired_scripts(dst))
+def _shim_stale(dst):
+    """True when HERMES_HOME/scripts/crew_proofs.sh exists and is not the shim (an old full copy)."""
+    path = os.path.join(dst, PROOFS_SHIM)
+    return os.path.isfile(path) and _read(path) != PROOFS_SHIM_TEXT.encode()
+
+
+def _write_shim(dst):
+    os.makedirs(dst, exist_ok=True)
+    path = os.path.join(dst, PROOFS_SHIM)
+    Path(path).write_text(PROOFS_SHIM_TEXT)
+    os.chmod(path, 0o755)
 
 
 def step_scripts(profile_home, apply):
-    src = os.path.join(SRC_DIR, "scripts")
+    """Remove the crew script copies an earlier install left in <profile>/scripts/, listing each one. An existing
+    crew_proofs.sh is rewritten as the shim so a registered nightly job keeps working."""
     dst = os.path.join(profile_home, "scripts")
-    if _scripts_ok(dst):
-        return "OK", "scripts (up to date)"
-    retired = _retired_scripts(dst)
+    stale = _stale_scripts(dst)
+    shim = _shim_stale(dst)
+    if not stale and not shim:
+        return "OK", "no crew script copies in %s (crew runs from plugins/crew/scripts)" % dst
+    what = ["remove " + ", ".join(stale)] if stale else []
+    if shim:
+        what.append("replace the old %s copy with the shim" % PROOFS_SHIM)
     if not apply:
-        return "CHANGED", "scripts -> copy into %s%s" % (dst, ", remove " + ", ".join(retired) if retired else "")
-    os.makedirs(dst, exist_ok=True)
-    for rel in SCRIPT_FILES:
-        d = os.path.join(dst, rel)
-        os.makedirs(os.path.dirname(d), exist_ok=True)
-        shutil.copy2(os.path.join(src, rel), d)
-    for rel in retired:
-        os.remove(os.path.join(dst, rel))
-    return "CHANGED", "scripts copied into %s%s" % (dst, ", removed " + ", ".join(retired) if retired else "")
+        return "CHANGED", "scripts in %s: %s" % (dst, "; ".join(what))
+    for rel in stale:
+        path = os.path.join(dst, rel)
+        os.remove(path)
+        print("  removed %s" % path)
+    for rel in {os.path.dirname(r) for r in stale if os.path.dirname(r)}:
+        try:
+            os.rmdir(os.path.join(dst, rel))     # only when nothing else is in it
+            print("  removed empty dir %s" % os.path.join(dst, rel))
+        except OSError:
+            pass
+    if shim:
+        _write_shim(dst)
+        print("  rewrote %s as the shim" % os.path.join(dst, PROOFS_SHIM))
+    return "CHANGED", "scripts in %s: %s" % (dst, "; ".join(what))
 
 
 def step_roles(profile_home, apply):
@@ -231,7 +313,7 @@ def _owner_record_set(**keys):
 
 def step_owner(profile, apply, force=False):
     """<base home>/crew/owner.json: the profile crew is installed into (the owner's chat profile) and, after
-    --publish, the dashboard's public URL. The feed, the dashboard and the proofs read it through
+    --publish, the dashboard's public URL. The dashboard, crew_notify and the proofs read it through
     crew_card.owner_profile() / dashboard_url(), so no script names a profile or a host.
     The first install records its profile; installing into another profile later never moves the owner
     silently - `--owner` does."""
@@ -249,8 +331,9 @@ def step_owner(profile, apply, force=False):
 
 def step_other_copies(profile_home, prefix, apply):
     """Every other profile that already has crew gets this version too (owner, 2026-10-01: "only the latest
-    released version in every profile"): plugin, skills, scripts and roles file, nothing else - its
-    config, services and ownership are left alone. Role profiles are kept current by the profiles step."""
+    released version in every profile"): plugin (scripts included), skills, roles file and the removal of old script
+    copies, nothing else - its config, services and ownership are left alone. Only a profile that already has
+    plugins/crew is touched; every change is printed. Role profiles are kept current by the profiles step."""
     base = str(Path.home() / ".hermes")
     roles = {home for _r, _n, home, _t in _role_plans(prefix)}
     homes = [base] + sorted(str(p) for p in (Path(base) / "profiles").glob("*") if p.is_dir())
@@ -262,15 +345,19 @@ def step_other_copies(profile_home, prefix, apply):
             continue
         steps = [f(home, False) for f in (step_plugin, step_skills, step_scripts, step_roles)]
         if any(st == "CHANGED" for st, _d in steps):
-            stale.append(home)
+            stale.append((home, [d for st, d in steps if st == "CHANGED"]))
     if not stale:
         return "OK", "every other crew copy is this version"
-    names = ", ".join(os.path.basename(h) if h != base else "default" for h in stale)
+    label = lambda home: os.path.basename(home) if home != base else "default"
+    names = ", ".join(label(home) for home, _d in stale)
     if not apply:
-        return "CHANGED", "bring crew up to this version in: %s" % names
-    for home in stale:
+        return "CHANGED", "bring crew up to this version in: %s" % "; ".join(
+            "%s (%s)" % (label(home), " | ".join(d)) for home, d in stale)
+    for home, _d in stale:
         for f in (step_plugin, step_skills, step_scripts, step_roles):
-            f(home, True)
+            status, detail = f(home, True)
+            if status == "CHANGED":
+                print("  %s: %s" % (label(home), detail))
     return "CHANGED", "crew brought up to this version in: %s" % names
 
 
@@ -295,9 +382,32 @@ def step_enable(profile, apply):
 
 
 def _config_get(profile, key):
-    r = h(profile, "config", "get", key)
-    out = r.stdout.strip()
-    return out if r.returncode == 0 and out else None
+    rc, out = _cfg_raw_many(profile, [key])[key]
+    out = (out or "").strip()
+    return out if rc == 0 and out else None
+
+
+_LIST_ITEM_RX = re.compile(r"^\s*-\s*(.*)$")
+
+
+def _cfg(profile, key):
+    """The value `hermes config get` prints for a dotted key, as one line: a scalar as it is, a list as
+    '[a,b]' ('[]' when empty), None when the key is not set. Hermes does the reading, the way it does the writing."""
+    rc, out = _cfg_raw_many(profile, [key])[key]
+    out = (out or "").strip()
+    if rc != 0 or not out:
+        return None
+    lines = [l for l in out.splitlines() if l.strip()]
+    if all(_LIST_ITEM_RX.match(l) for l in lines):
+        return "[%s]" % ",".join(_LIST_ITEM_RX.match(l).group(1).strip() for l in lines)
+    return out if len(lines) > 1 else lines[0].strip()
+
+
+def _cfg_many(profile, keys):
+    """{key: _cfg(profile, key)}: all keys read in one in-process call (see _cfg_raw_many)."""
+    keys = list(keys)
+    _cfg_raw_many(profile, keys)
+    return {k: _cfg(profile, k) for k in keys}
 
 
 def step_config(profile_home, profile, apply):
@@ -347,22 +457,26 @@ def spill_cap_needed():
     return max(15000, -(-need // 1000) * 1000)
 
 
-def step_spill_cap(profile_home, profile, apply):
-    """Raise hooks.output_spill.max_chars above the intake preload, in the profile the owner types
-    /crew in. Under the cap the /crew turn costs one tool call (the read of the spilled skill text)
-    and the intake proof - which asserts zero - fails, while the model's answer is unchanged."""
+def step_spill_cap(profile, apply, enabled):
+    """--spill-cap: raise hooks.output_spill.max_chars above the intake preload, in the profile the owner types
+    /crew in (the installing profile, never a role profile: a role runs cards, not the /crew intake). Under the cap
+    the /crew turn costs one tool call (the read of the spilled skill text) and the intake proof - which asserts
+    zero - fails, while the model's answer is unchanged. Opt-in because it changes a profile-wide setting."""
     need = spill_cap_needed()
-    cur = _yaml_read_key(profile_home, "hooks.output_spill.max_chars")
+    cur = _cfg(profile, "hooks.output_spill.max_chars")
     try:
         have = int(str(cur).strip()) if cur is not None else 0
     except (TypeError, ValueError):
         have = 0
     if have >= need:
         return "OK", "hooks.output_spill.max_chars = %d" % have
+    if not enabled:
+        return "SKIP", ("hooks.output_spill.max_chars is %s, the /crew preload needs %d: a /crew turn costs one extra "
+                        "tool call until you pass --spill-cap" % (cur or "unset (Hermes default 10000)", need))
     if not apply:
         return "CHANGED", "config set hooks.output_spill.max_chars %d (was %s)" % (need, cur or "unset")
     h(profile, "config", "set", "hooks.output_spill.max_chars", str(need))
-    written = _yaml_read_key(profile_home, "hooks.output_spill.max_chars")
+    written = _cfg(profile, "hooks.output_spill.max_chars")
     if str(written).strip() != str(need):
         return "FAILED", "hooks.output_spill.max_chars still %s after config set" % (written or "unset")
     return "CHANGED", "config set hooks.output_spill.max_chars %d (was %s)" % (need, cur or "unset")
@@ -374,7 +488,7 @@ def step_spill_cap(profile_home, profile, apply):
 # core-commands-first with the crew options sorted alphabetically, so /crew (a skill command, tier 2) sits
 # under the built-ins. The order here is importance: the intake, then the options typed every day, then the
 # recovery passes, then the install.
-CREW_MENU_ORDER = ["crew", "crew-status", "crew-graph", "crew-stop", "crew-diagnose"]
+CREW_MENU_ORDER = ["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-diagnose"]
 
 
 def _menu_names(raw):
@@ -385,19 +499,20 @@ def _menu_names(raw):
     return [n.strip().strip("'\"") for n in raw[1:-1].split(",") if n.strip()]
 
 
-def step_menu_priority(profile_home, profile, apply):
-    """Put /crew first in the platform command menu, the crew options behind it in importance order."""
+def step_menu_priority(profile, apply, enabled):
+    """--telegram-menu: put /crew first in the platform command menu, the crew options behind it in importance order."""
     dotted = "platforms.telegram.extra.command_menu.priority"
-    mode = (_yaml_read_key(profile_home, dotted + "_mode") or "").strip()
-    have = _yaml_read_key(profile_home, dotted) or ""
-    if mode == "prepend" and _menu_names(have) == CREW_MENU_ORDER:
+    if not enabled:
+        return "SKIP", "telegram command menu order (--telegram-menu)"
+    have = _cfg_many(profile, [dotted + "_mode", dotted])
+    if (have[dotted + "_mode"] or "") == "prepend" and _menu_names(have[dotted] or "") == CREW_MENU_ORDER:
         return "OK", "telegram command menu leads with %s" % ", ".join("/" + n for n in CREW_MENU_ORDER)
     if not apply:
         return "CHANGED", "config set %s (/%s first, %d name(s))" % (dotted, CREW_MENU_ORDER[0],
                                                                      len(CREW_MENU_ORDER))
     h(profile, "config", "set", dotted + "_mode", "prepend")
     h(profile, "config", "set", dotted, json.dumps(CREW_MENU_ORDER))
-    got = _menu_names(_yaml_read_key(profile_home, dotted) or "")
+    got = _menu_names(_cfg(profile, dotted) or "")
     if got != CREW_MENU_ORDER:
         return "FAILED", "%s is %s after config set" % (dotted, got or "unset")
     return "CHANGED", "config set %s (/%s first)" % (dotted, CREW_MENU_ORDER[0])
@@ -405,8 +520,10 @@ def step_menu_priority(profile_home, profile, apply):
 
 # ------------------------------------------------------------------- shell-hook consent
 # A hook only fires when its (event, command) pair sits in that home's shell-hooks-allowlist.json:
-# without the entry the runtime logs "not allowlisted - skipped" and the gate is simply absent. So
-# the installer owns the record instead of a hand-consented file that drifts from config.yaml.
+# without the entry the runtime logs "not allowlisted - skipped" and the gate is simply absent. The
+# approval is the owner's: Hermes asks at its own TTY prompt (or `--accept-hooks`, typed by the owner).
+# The installer never writes that file and never passes --accept-hooks; it reads it and reports what is
+# still missing.
 
 ALLOWLIST_NAME = "shell-hooks-allowlist.json"
 # the runtime's own rule for finding the script inside a hook command
@@ -416,8 +533,8 @@ _SCRIPT_EXTENSIONS = (".sh", ".bash", ".zsh", ".fish", ".py", ".pyw", ".rb", ".p
 
 def _script_path(command):
     """The script a hook command runs, by the runtime's rule: first token with a script extension,
-    else the first path-like token, else the first token. Kept identical so the mtime recorded here
-    is the mtime the runtime compares against later."""
+    else the first path-like token, else the first token. Kept identical so the mtime read here
+    is the mtime the runtime compares against."""
     parts = (command or "").split()
     if not parts:
         return ""
@@ -432,10 +549,6 @@ def _script_path(command):
 
 def _iso(mtime):
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _utc_now_iso():
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _mtime_iso(command):
@@ -536,41 +649,6 @@ def permission_problems(home):
     return findings
 
 
-def _approve(home, event, command):
-    """Record one approval exactly as the runtime records it, under the runtime's own lock.
-
-    Returns 'approved' / 'refreshed' / '' (already current), so an install stays idempotent.
-    """
-    path = Path(home) / ALLOWLIST_NAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    now, stamp = _mtime_iso(command), _utc_now_iso()
-    lock = path.with_suffix(path.suffix + ".lock")
-    with open(lock, "a+") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        data = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-            except ValueError:
-                data = {}              # a record the runtime cannot parse is replaced, not merged
-        entries = [e for e in data.get("approvals", []) if isinstance(e, dict)]
-        kept = [e for e in entries if (e.get("event"), e.get("command")) != (event, command)]
-        old = next((e for e in entries if (e.get("event"), e.get("command")) == (event, command)), None)
-        if old and old.get("script_mtime_at_approval") == now:
-            return ""
-        kept.append({"event": event, "command": command, "approved_at": stamp,
-                     "script_mtime_at_approval": now})
-        data["approvals"] = kept
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=1) + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return "refreshed" if old else "approved"
-
-
 PROFILE_PREFIX = "crew-"
 
 
@@ -613,103 +691,87 @@ def _conf_list(conf_path, key):
     return []
 
 
-def settings_problems(home, role, tpl):
-    """The role's own settings.conf, checked line by line against the home's config.yaml.
+def settings_problems(profile, role, tpl):
+    """The role's own settings.conf, checked line by line against the profile's config (read by `hermes config get`).
 
     The gates are only half of it: a role home without crew.role, without the empty
     fallback_providers, or with Slack left on is not the role the card contract assumes.
     """
-    findings = []
-    for key, want in _conf_entries(os.path.join(tpl, "settings.conf")):
-        if key == "crew.role":
-            want = role
-        have = _yaml_read_key(home, key)
-        if (have or "").strip() != want:
-            findings.append("%s = %s, want %s" % (key, (have or "unset").strip(), want))
-    return findings
+    entries = [(k, role if k == "crew.role" else v) for k, v in _conf_entries(os.path.join(tpl, "settings.conf"))]
+    have = _cfg_many(profile, [k for k, _v in entries])
+    return ["%s = %s, want %s" % (key, (have[key] or "unset").strip(), want)
+            for key, want in entries if (have[key] or "").strip() != want]
 
 
-def step_permissions(profile_home, prefix, apply):
-    """Every crew home's shell-hook consent and role settings, owned by the installer.
+def consent_hint(name):
+    """How the owner approves one profile's hooks with Hermes's own flow."""
+    flag = " ".join(profile_flag(name))
+    cli = "hermes %s" % flag if flag else "hermes"
+    return ("approve with Hermes, not the installer: review `%s hooks list`, then run `%s chat` in a terminal and "
+            "confirm each hook at its prompt (or `%s chat --accept-hooks` once, yourself); check with `%s hooks doctor`"
+            % (cli, cli, cli, cli))
 
-    Covers the installing profile and each role profile: the hooks the config declares are the hooks
-    that must be approved, read from that home's own file.
+
+def step_permissions(profile_home, profile, prefix, apply):
+    """Report-only: which declared shell hooks of the installing profile and of each role profile Hermes would skip.
+
+    Never writes. The coordinator's decision turn (`hermes -p <prefix>coordinator chat -Q`) runs without
+    --accept-hooks, so a role profile that inherited the owner's gates (facts-gate, model-gate, ...) only enforces
+    them once its own allowlist holds them; kanban workers are started with --accept-hooks by the dispatcher.
     """
-    homes = [("", profile_home)]
-    homes += [(role, home) for role, _name, home, _tpl in _role_plans(prefix) if os.path.isdir(home)]
-    findings = []
-    for role, home in homes:
-        findings += ["%s: %s" % (os.path.basename(home), f) for f in permission_problems(home)]
-        if role:
-            tpl = str(SRC_DIR / "templates" / "profiles" / role)
-            findings += ["%s: %s" % (os.path.basename(home), f)
-                         for f in settings_problems(home, role, tpl)]
+    homes = [(profile or "default", profile_home)]
+    homes += [(name, home) for _role, name, home, _tpl in _role_plans(prefix) if os.path.isdir(home)]
+    findings, hints = [], []
+    for name, home in homes:
+        found = permission_problems(home)
+        if found:
+            findings += ["%s: %s" % (name, f) for f in found]
+            hints.append("%s: %s" % (name, consent_hint(name)))
     if not findings:
-        pairs = sum(len(_declared_hooks(home)) for _role, home in homes)
-        return "OK", "%d home(s), %d hook approvals, role settings in place" % (len(homes), pairs)
+        pairs = sum(len(_declared_hooks(home)) for _name, home in homes)
+        return "OK", "%d home(s), %d declared hook(s), every one approved in Hermes's allowlist" % (len(homes), pairs)
     summary = "; ".join(findings[:3]) + ("" if len(findings) <= 3 else " (+%d more)" % (len(findings) - 3))
-    if not apply:
-        return "CHANGED", summary
-    written = {"approved": 0, "refreshed": 0}
-    for _role, home in homes:
-        for event, command in _declared_hooks(home):
-            word = _approve(home, event, command)
-            if word:
-                written[word] += 1
-    left = []
-    for role, home in homes:
-        left += ["%s: %s" % (os.path.basename(home), f) for f in permission_problems(home)]
-        if role:
-            tpl = str(SRC_DIR / "templates" / "profiles" / role)
-            left += ["%s: %s" % (os.path.basename(home), f)
-                     for f in settings_problems(home, role, tpl)]
-    if left:
-        return "FAILED", "; ".join(left[:3]) + ("" if len(left) <= 3 else " (+%d more)" % (len(left) - 3))
-    return "CHANGED", ("approved %d hook pair(s), refreshed %d (mtime drift)"
-                       % (written["approved"], written["refreshed"]))
+    return "FAILED", "hook consent missing - %s | %s" % (summary, " | ".join(hints))
 
 
-def render_unit(profile_home):
-    script = os.path.join(profile_home, "scripts", "kanban_zulip_feed.py")
-    return (
-        "[Unit]\n"
-        "Description=Hermes kanban -> Zulip #Kanban live feed (one live message per task run, edited in place)\n"
-        "After=hermes-gateway.service\n"
-        "\n"
-        "[Service]\n"
-        "Type=simple\n"
-        "ExecStart=%s %s --daemon\n"
-        "Environment=KANBAN_FEED_POLL=3\n"
-        "Environment=\"KANBAN_FEED_MUTE=%s\"\n"
-        "Restart=always\n"
-        "RestartSec=10\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=default.target\n"
-    ) % (python3_bin(), script, FEED_MUTE)
+def plugin_script(profile_home, name):
+    """A crew script inside the profile's plugin copy: where every unit and every skill runs it from."""
+    return os.path.join(profile_home, "plugins", "crew", "scripts", name)
 
 
-def step_unit(profile_home, apply, no_service):
-    if no_service:
-        return "SKIP", "feed unit (--no-service)"
-    unit = render_unit(profile_home)
-    unit_path = UNIT_DIR / UNIT_NAME
-    if os.path.exists(str(unit_path)) and _read(str(unit_path)) == unit.encode():
-        return "OK", "feed unit up to date"
-    if not apply:
-        return "CHANGED", "feed unit -> %s" % unit_path
-    os.makedirs(UNIT_DIR, exist_ok=True)
-    tmp = str(unit_path) + ".tmp"
-    with open(tmp, "w") as fh:
-        fh.write(unit)
-    os.replace(tmp, str(unit_path))
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", UNIT_NAME], capture_output=True, text=True)
-    return "CHANGED", "feed unit written + daemon-reload + enable --now"
+def _ts_humans():
+    """Tailnet logins of people (not this node's own user, not tagged devices): who --publish may let in."""
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10)
+        data = json.loads(r.stdout) if r.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    return sorted(u.get("LoginName") for u in (data.get("User") or {}).values()
+                  if "@" in str(u.get("LoginName") or ""))
+
+
+def publish_settings(name, user=""):
+    """(hosts, users, error) for --publish. The dashboard serves transcript excerpts, so a published one needs an
+    identity in front of it: `tailscale serve` adds Tailscale-User-Login to every request it proxies, and the server
+    answers a tailnet request only for these logins. --publish-user names the owner; without it the tailnet's single
+    human login is used, and anything else is refused rather than guessed."""
+    if not name:
+        return "", "", "tailscale is not up on this machine"
+    users = [user] if user else _ts_humans()
+    if len(users) != 1:
+        return "", "", ("pass --publish-user <tailnet login> (found %s)" % (", ".join(users) or "no human login"))
+    return name, users[0], ""
 
 
 def render_graph_unit(profile_home, port=GRAPH_PORT):
-    script = os.path.join(profile_home, "scripts", "crew_graph_serve.py")
+    script = plugin_script(profile_home, "crew_graph_serve.py")
+    rec = _owner_record()
+    publish = ""
+    if rec.get("publish_hosts") and (rec.get("publish_users") or rec.get("publish_tags")):   # recorded by --publish
+        publish = ("Environment=CREW_GRAPH_HOSTS=%s\nEnvironment=CREW_GRAPH_USERS=%s\n"
+                   % (rec["publish_hosts"], rec.get("publish_users") or ""))
+        if rec.get("publish_tags"):
+            publish += "Environment=CREW_GRAPH_TAGS=%s\n" % rec["publish_tags"]
     return (
         "[Unit]\n"
         "Description=Hermes crew flow graph over HTTP (board + session stores, read-only)\n"
@@ -720,12 +782,13 @@ def render_graph_unit(profile_home, port=GRAPH_PORT):
         "ExecStart=%s %s\n"
         "Environment=CREW_GRAPH_BIND=127.0.0.1\n"
         "Environment=CREW_GRAPH_PORT=%d\n"
+        "%s"
         "Restart=always\n"
         "RestartSec=5\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
-    ) % (python3_bin(), script, port)
+    ) % (python3_bin(), script, port, publish)
 
 
 def step_graph_unit(profile_home, apply, no_service, port=GRAPH_PORT):
@@ -751,9 +814,11 @@ def step_graph_unit(profile_home, apply, no_service, port=GRAPH_PORT):
         fh.write(unit)
     os.replace(tmp, str(unit_path))
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", UNIT_GRAPH_NAME],
-                   capture_output=True, text=True)
-    return "CHANGED", "graph http unit written + daemon-reload + enable --now"
+    # enable, then restart: `enable --now` leaves an already-running server on the old unit (and, on an upgrade,
+    # on the old script path the install just removed - 2026-10-03, the 0.6 server kept answering 500)
+    subprocess.run(["systemctl", "--user", "enable", UNIT_GRAPH_NAME], capture_output=True, text=True)
+    subprocess.run(["systemctl", "--user", "restart", UNIT_GRAPH_NAME], capture_output=True, text=True)
+    return "CHANGED", "graph http unit written + daemon-reload + enable + restart"
 
 
 def _ts_name():
@@ -818,8 +883,12 @@ def _kanban_toolset_state(profile, platform):
     return m.group(1) if m else ""
 
 
-def step_chat_kanban(profile, apply):
-    """Turn the kanban toolset on for the chat platforms, so the intake's kanban_create tool exists there."""
+def step_chat_kanban(profile, apply, enabled):
+    """--chat-kanban: turn the kanban toolset on for the chat platforms, so the intake's kanban_create tool exists
+    there. Opt-in: it lets a chat on that platform create and move cards, which is the owner's call."""
+    if not enabled:
+        return "SKIP", "kanban toolset on %s (--chat-kanban; without it /crew cannot open a card there)" % ", ".join(
+            CHAT_KANBAN_PLATFORMS)
     off = [p for p in CHAT_KANBAN_PLATFORMS if _kanban_toolset_state(profile, p) == "disabled"]
     if not off:
         return "OK", "kanban toolset on for %s" % ", ".join(CHAT_KANBAN_PLATFORMS)
@@ -842,9 +911,12 @@ def _proof_board():
     return crew_proof_board
 
 
-def step_proofs_board(apply):
-    """The kernel's own `crew-proofs` board, where every proof seeds its cards (never the live board).
+def step_proofs_board(apply, enabled=True):
+    """The kernel's own `crew-proofs` board, where every proof seeds its cards (never the live board). Only with
+    --nightly-proofs: crew_proofs.py creates it itself when someone runs the proofs by hand.
     `kanban boards create` has mkdir -p semantics, so an existing board is left as it is."""
+    if not enabled:
+        return "SKIP", "crew-proofs board (--nightly-proofs creates it; crew_proofs.py creates it on a manual run)"
     pb = _proof_board()
     if os.path.exists(pb.proofs_db()):
         return "OK", "crew-proofs board %s" % pb.proofs_db()
@@ -855,20 +927,34 @@ def step_proofs_board(apply):
     return "CHANGED", "created the crew-proofs board at %s" % pb.proofs_db()
 
 
-def step_proofs_cron(profile, apply, no_cron):
-    """Nightly: run every crew proof on the crew-proofs board; the job stays silent unless one of them
-    fails. crew_proofs.py pins the board for every proof, so the cron needs no board setting of its own."""
+def step_proofs_cron(profile, profile_home, apply, no_cron, nightly=False, deliver=CRON_PROOFS_DELIVER):
+    """--nightly-proofs: run every crew proof on the crew-proofs board each night; the job stays silent unless one of
+    them fails, and its output goes to `deliver` (local unless --proofs-deliver names a target). crew_proofs.py pins
+    the board for every proof, so the cron needs no board setting of its own. Hermes cron only runs scripts from
+    HERMES_HOME/scripts, so the one file crew keeps there is the shim that hands over to the plugin's copy. A job an
+    earlier install registered stays registered (its script is migrated to the shim by the scripts step)."""
     if no_cron:
         return "SKIP", "proofs cron (--no-cron)"
     cid = _cron_id(profile, CRON_PROOFS_NAME)
-    if cid:
+    shim = os.path.join(profile_home, "scripts", PROOFS_SHIM)
+    shim_ok = _read(shim) == PROOFS_SHIM_TEXT.encode()
+    if not nightly:
+        if cid:
+            return "OK", "proofs cron %s (registered earlier; kept)" % cid
+        return "SKIP", "proofs cron (--nightly-proofs registers it; delivery %s unless --proofs-deliver)" % deliver
+    if cid and shim_ok:
         return "OK", "proofs cron %s" % cid
     if not apply:
-        return "CHANGED", "proofs cron (nightly)"
+        return "CHANGED", "proofs cron (nightly, deliver %s)%s" % (deliver, "" if shim_ok else ", write " + shim)
+    if not shim_ok:
+        _write_shim(os.path.join(profile_home, "scripts"))
+        print("  wrote %s" % shim)
+    if cid:
+        return "CHANGED", "proofs cron %s: shim written" % cid
     h(profile, "cron", "create", CRON_PROOFS_SCHEDULE, "--name", CRON_PROOFS_NAME,
-      "--script", "crew_proofs.sh", "--no-agent", "--deliver", CRON_PROOFS_DELIVER)
+      "--script", PROOFS_SHIM, "--no-agent", "--deliver", deliver)
     cid = _cron_id(profile, CRON_PROOFS_NAME)
-    return "CHANGED", "proofs cron %s" % (cid or "(not found after create)")
+    return "CHANGED", "proofs cron %s (deliver %s)" % (cid or "(not found after create)", deliver)
 
 
 def skill_names():
@@ -950,12 +1036,22 @@ def role_skills_todo(home, tpl, source_home):
     return _skills_excess(home, extras), _extras_missing(home, source_home, extras), marker
 
 
-def step_role_skills(home, tpl, source_home, apply):
-    """Cut a role profile's skills dir down to skills/crew/ + skills_extra. Only ever called on a role
-    profile the installer provisions (never the installing profile); a symlinked skills dir is left alone."""
+def crew_owned(home):
+    """A role profile crew itself created: it carries the record the installer writes into every profile it provisions."""
+    return os.path.isfile(os.path.join(home, SHIPPED_RECORD))
+
+
+def step_role_skills(home, tpl, source_home, apply, owned=True):
+    """Cut a role profile's skills dir down to skills/crew/ + skills_extra, printing every path it removes. Only ever
+    called on a role profile the installer provisions (never the installing profile), and only deletes in a profile
+    crew created (`owned`: created in this run, or carrying crew/template-shipped.json); a symlinked skills dir is
+    left alone."""
     root = os.path.join(home, "skills")
     if os.path.islink(root):
         return "FAILED", "%s is a symlink; left alone" % root
+    if not owned:
+        return "SKIP", "role skills of %s left alone: crew did not create it (no %s)" % (
+            os.path.basename(home), SHIPPED_RECORD)
     excess, missing, marker = role_skills_todo(home, tpl, source_home)
     if not (excess or missing or marker):
         return "OK", "role skills slim (%s)" % os.path.basename(home)
@@ -969,6 +1065,7 @@ def step_role_skills(home, tpl, source_home, apply):
         shutil.copytree(os.path.join(source_home, "skills", rel), os.path.join(root, rel), symlinks=True)
     for name in _skills_excess(home, extras):
         path = os.path.join(root, name)
+        print("  removed %s" % path)
         if os.path.islink(path) or os.path.isfile(path):
             os.unlink(path)
         else:
@@ -1084,204 +1181,20 @@ ROLE_DESCS = {
 SHIPPED_RECORD = os.path.join("crew", "template-shipped.json")
 
 
-def _top_extent(lines, idx):
-    """End index of the top-level entry starting at lines[idx]: its line plus indented body."""
-    j = idx + 1
-    while j < len(lines):
-        if re.match(r"^\s+\S", lines[j]):
-            j += 1
-            continue
-        if not lines[j].strip():
-            k = j
-            while k < len(lines) and not lines[k].strip():
-                k += 1
-            if k < len(lines) and re.match(r"^\s+\S", lines[k]):
-                j = k
-                continue
-        break
-    return j
-
-
-def _format_entry(key, raw, indent):
-    pad = " " * indent
-    if raw.startswith("[") and raw.endswith("]"):
-        items = [x.strip() for x in raw[1:-1].split(",") if x.strip()]
-        if not items:
-            return ["%s%s: []\n" % (pad, key)]
-        return ["%s%s:\n" % (pad, key)] + ["%s  - %s\n" % (pad, it) for it in items]
-    return ["%s%s: %s\n" % (pad, key, raw)]
-
-
-def _indent(line):
-    return len(line) - len(line.lstrip(" "))
-
-
-def _deep_extent(lines, idx, end):
-    """End index of the nested entry at lines[idx]: every following line indented deeper."""
-    ind = _indent(lines[idx])
-    j = idx + 1
-    while j < end and (not lines[j].strip() or _indent(lines[j]) > ind):
-        j += 1
-    while j > idx + 1 and not lines[j - 1].strip():
-        j -= 1
-    return j
-
-
-def _deep_find(lines, parts):
-    """[(idx, extent)] for each level of a dotted path (2 spaces per level); stops at a miss."""
-    found, start, end = [], 0, len(lines)
-    for depth, part in enumerate(parts):
-        pat = re.compile(r"^%s%s:(\s|$)" % (" " * (2 * depth), re.escape(part)))
-        idx = next((i for i in range(start, end) if pat.match(lines[i])), None)
-        if idx is None:
-            break
-        ext = _deep_extent(lines, idx, end)
-        found.append((idx, ext))
-        start, end = idx + 1, ext
-    return found
-
-
-def _deep_read(lines, parts):
-    found = _deep_find(lines, parts)
-    if len(found) < len(parts):
-        return None
-    idx, ext = found[-1]
-    inline = lines[idx].split(":", 1)[1].strip()
-    if inline:
-        return inline
-    return "[%s]" % ",".join(
-        m.group(1).strip() for m in (re.match(r"^\s+-\s*(.*)$", l) for l in lines[idx + 1:ext]) if m)
-
-
-def _deep_set(lines, parts, raw):
-    """Set a 3+ level dotted key in-place (lines keep their newlines); builds missing parents."""
-    found = _deep_find(lines, parts)
-    if len(found) == len(parts):
-        idx, ext = found[-1]
-        lines[idx:ext] = _format_entry(parts[-1], raw, 2 * (len(parts) - 1))
-        return
-    depth = len(found)
-    if found:
-        pidx, pext = found[-1]
-        if lines[pidx].split(":", 1)[1].strip():
-            # Parent carries an inline value ({} or a scalar): open it up as a block.
-            lines[pidx:pext] = ["%s%s:\n" % (" " * (2 * (depth - 1)), parts[depth - 1])]
-            pext = pidx + 1
-        at = pext
-    else:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        at = len(lines)
-    new = ["%s%s:\n" % (" " * (2 * d), parts[d]) for d in range(depth, len(parts) - 1)]
-    new += _format_entry(parts[-1], raw, 2 * (len(parts) - 1))
-    lines[at:at] = new
-
-
-def _yaml_read_key(profile_home, dotted):
-    """Effective value of a dotted key from config.yaml as text ('v', or '[a,b]')."""
-    try:
-        lines = Path(os.path.join(profile_home, "config.yaml")).read_text().splitlines()
-    except OSError:
-        return None
-    if dotted.count(".") >= 2:
-        return _deep_read(lines, dotted.split("."))
-    if "." not in dotted:
-        idx = next((i for i, l in enumerate(lines) if re.match(r"^%s:\s*" % re.escape(dotted), l)), None)
-        if idx is None:
-            return None
-        inline = lines[idx].split(":", 1)[1].strip()
-        if inline:
-            return inline
-        body = [l for l in lines[idx + 1:_top_extent(lines, idx)] if l.strip()]
-        if body and not all(re.match(r"^\s+-\s*", l) for l in body):
-            # A mapping block (mcp_servers:, providers:) is not an empty list; return its text so a
-            # template value can never equal it by accident, which is how a whole block got skipped.
-            return "[block %d lines]" % len(body)
-        return "[%s]" % ",".join(
-            m.group(1).strip() for m in
-            (re.match(r"^\s+-\s*(.*)$", l) for l in body) if m)
-    block, _, key = dotted.partition(".")
-    start = end = None
-    for i, line in enumerate(lines):
-        if re.match(r"^%s:\s*$" % re.escape(block), line):
-            j = _top_extent(lines, i)
-            start, end = i + 1, j
-            break
-    if start is None:
-        return None
-    for i in range(start, end):
-        m = re.match(r"^  %s:\s*(.*)$" % re.escape(key), lines[i])
-        if not m:
-            continue
-        if m.group(1).strip():
-            return m.group(1).strip()
-        return "[%s]" % ",".join(
-            x.group(1).strip() for x in
-            (re.match(r"^\s+-\s*(.*)$", l) for l in lines[i + 1:end]) if x)
-    return None
-
-
-def _yaml_set_key(profile_home, dotted, raw):
-    """Write a dotted key into the profile's config.yaml. raw: 'v', '[a,b]' or '[]'."""
-    path = os.path.join(profile_home, "config.yaml")
-    try:
-        lines = Path(path).read_text().splitlines(keepends=True)
-    except OSError:
-        return False
-    if dotted.count(".") >= 2:
-        _deep_set(lines, dotted.split("."), raw)
-        tmp = path + ".crew-tmp"
-        Path(tmp).write_text("".join(lines))
-        os.replace(tmp, path)
-        return True
-    if "." not in dotted:
-        idx = next((i for i, l in enumerate(lines) if re.match(r"^%s:\s*" % re.escape(dotted), l)), None)
-        new = _format_entry(dotted, raw, 0)
-        if idx is None:
-            if lines and not lines[-1].endswith("\n"):
-                lines[-1] += "\n"
-            lines.extend(["%s:\n" % dotted] + new[1:] if new[0].startswith("%s:\n" % dotted)
-                         else new)
-        else:
-            lines[idx:_top_extent(lines, idx)] = new
-        tmp = path + ".crew-tmp"
-        Path(tmp).write_text("".join(lines))
-        os.replace(tmp, path)
-        return True
-    block, _, key = dotted.partition(".")
-    start = end = None
-    for i, line in enumerate(lines):
-        if re.match(r"^%s:\s*$" % re.escape(block), line):
-            start, end = i + 1, _top_extent(lines, i)
-            break
-    if start is None:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines.append("%s:\n" % block)
-        start = end = len(lines)
-    i = start
-    while i < end:
-        if re.match(r"^  %s:\s*" % re.escape(key), lines[i]):
-            j = i + 1
-            while j < end and re.match(r"^\s", lines[j]) and not re.match(r"^  \S", lines[j]):
-                j += 1
-            del lines[i:j]
-            end -= (j - i)
-            break
-        i += 1
-    lines[end:end] = _format_entry(key, raw, 2)
-    tmp = path + ".crew-tmp"
-    Path(tmp).write_text("".join(lines))
-    os.replace(tmp, path)
-    return True
-
-
-def _apply_settings(profile_home, conf_path):
-    """Apply key = value lines from a template settings file. Returns the keys it changed."""
+def _apply_settings(profile, conf_path):
+    """Apply key = value lines from a template settings file with `hermes config set` (Hermes's own writer).
+    Returns the keys it changed; a key whose set failed is not in the list, so the next check still reports it."""
+    entries = _conf_entries(conf_path)
+    have = _cfg_many(profile, [k for k, _v in entries])
     changed = []
-    for key, val in _conf_entries(conf_path):
-        if _yaml_read_key(profile_home, key) != val and _yaml_set_key(profile_home, key, val):
+    for key, val in entries:
+        if have[key] == val:
+            continue
+        r = h(profile, "config", "set", key, val)
+        if r.returncode == 0:
             changed.append(key)
+        else:
+            print("  config set %s failed: %s" % (key, ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1]))
     return changed
 
 
@@ -1320,14 +1233,14 @@ def _role_plans(profile):
             for role in ROLE_ORDER if (tpl_root / role).is_dir()]
 
 
-def _provision_role_profile(name, home, tpl, source_home):
-    """Give a role profile the same plugin, crew skills, scripts, roles file and crew dirs as the
+def _provision_role_profile(name, home, tpl, source_home, owned):
+    """Give a role profile the same plugin (scripts included), crew skills, roles file and crew dirs as the
     installing profile: a clone carries the enabled list but not the plugin itself, and without
     it the role guards (budget hard stop, verifier read-only) and the card tool do not exist.
-    Then cut its skills dir down to what the role uses (step_role_skills)."""
+    Then cut its skills dir down to what the role uses (step_role_skills, crew-created profiles only)."""
     done = []
     for step in (step_plugin, step_skills, step_scripts, step_roles, step_crew_dirs,
-                 lambda h_, a_: step_role_skills(h_, tpl, source_home, a_)):
+                 lambda h_, a_: step_role_skills(h_, tpl, source_home, a_, owned)):
         try:
             status, detail = step(home, True)
             if status == "CHANGED":
@@ -1341,7 +1254,6 @@ def _provision_role_profile(name, home, tpl, source_home):
 
 
 def step_profiles(source_profile, prefix, apply, no_profiles=False):
-    import json
     if no_profiles:
         return "SKIP", "role profiles (--no-profiles)"
     plans = _role_plans(prefix)
@@ -1358,18 +1270,8 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             cur = Path(os.path.join(home, "SOUL.md")).read_text()
         # Write SOUL.md when the profile is new, or when the file is still the one we shipped.
         soul_need = (not exists) or (cur != shipped and rec.get("SOUL.md") == _sha(cur or ""))
-        settings_need = False
-        if exists:
-            _cap = str(_yaml_read_key(home, "hooks.output_spill.max_chars") or "").strip()
-            if _cap != str(spill_cap_needed()):
-                # The cap is derived from the shipped skill (see spill_cap_needed), not from a
-                # settings.conf line: one number, so a skill that grows cannot leave a role profile
-                # spilling its /crew preload to a file the intake turn then has to read.
-                settings_need = True
-            for k, v in _conf_entries(os.path.join(tpl, "settings.conf")):
-                if _yaml_read_key(home, k) != v:
-                    settings_need = True
-        # A role profile holds its own copy of the plugin, skills, scripts and roles file; a clone
+        settings_need = exists and bool(settings_problems(name, role, tpl))
+        # A role profile holds its own copy of the plugin (scripts included), skills and roles file; a clone
         # carries none of them, and a package update has to reach the role copies too.
         provision_need = exists and not (
             # The plugin copy is compared file for file, not by existence: a package update that only
@@ -1377,10 +1279,11 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             # said "up to date", and the parity proof then failed on 5 profiles. The plugin IS the
             # package root, so its files are compared against plugins/crew/ in the profile.
             _tree_ok(str(SRC_DIR), os.path.join(home, "plugins", "crew"), PLUGIN_FILES)
-            and os.path.exists(os.path.join(home, "scripts", "crew_card.py"))
-            and _scripts_ok(os.path.join(home, "scripts"))
+            and not _stale_scripts(os.path.join(home, "scripts"))
+            and not _shim_stale(os.path.join(home, "scripts"))
             and _tree_ok(str(SRC_DIR / "roles"), os.path.join(home, "roles", "crew"), ROLE_FILES)
-            and not any(role_skills_todo(home, tpl, resolve_profile_home(source_profile))))
+            and (not crew_owned(home)
+                 or not any(role_skills_todo(home, tpl, resolve_profile_home(source_profile)))))
         if soul_need or settings_need or provision_need:
             todo.append((role, name, home, tpl, exists))
     if not todo:
@@ -1391,11 +1294,17 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
     done = []
     for role, name, home, tpl, existed in todo:
         if not os.path.isdir(home):
-            h(source_profile, "profile", "create", name, "--clone-from", source_profile,
-              "--description", ROLE_DESCS.get(role, ""))
+            # --clone-from: Hermes has no partial clone. The role needs the provider credentials (.env) and, through
+            # config.yaml, the owner's shell-hook gates; both come with the clone, which also copies SOUL.md (replaced
+            # below), skills (cut to skills/crew below) and memories/MEMORY.md + USER.md. Channels are stripped by Hermes.
+            r = h(source_profile, "profile", "create", name, "--clone-from", source_profile,
+                  "--description", ROLE_DESCS.get(role, ""))
+            if r.returncode != 0:
+                print("  profile create %s failed: %s" % (name, ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1]))
         if not os.path.isdir(home):
             done.append("%s FAILED" % name)
             continue
+        owned = (not existed) or crew_owned(home)
         os.makedirs(os.path.join(home, "crew"), exist_ok=True)
         rec = _shipped_record(home)
         soul_src = os.path.join(tpl, "SOUL.md")
@@ -1406,12 +1315,9 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             if (not existed) or cur == shipped or rec.get("SOUL.md") == _sha(cur or ""):
                 Path(dst).write_text(shipped)
                 rec["SOUL.md"] = _sha(shipped)
-        keys = _apply_settings(home, os.path.join(tpl, "settings.conf"))
-        if str(_yaml_read_key(home, "hooks.output_spill.max_chars") or "").strip() != str(spill_cap_needed()):
-            if _yaml_set_key(home, "hooks.output_spill.max_chars", str(spill_cap_needed())):
-                keys.append("hooks.output_spill.max_chars")
+        keys = _apply_settings(name, os.path.join(tpl, "settings.conf"))
         rec["settings"] = keys
-        rec["provisioned"] = _provision_role_profile(name, home, tpl, resolve_profile_home(source_profile))
+        rec["provisioned"] = _provision_role_profile(name, home, tpl, resolve_profile_home(source_profile), owned)
         Path(os.path.join(home, SHIPPED_RECORD)).write_text(json.dumps(rec, indent=2, sort_keys=True))
         done.append(name if not existed else "%s (%s)" % (name, ",".join(keys) or "up to date"))
     return "CHANGED", "role profiles -> " + ", ".join(done)
@@ -1427,17 +1333,17 @@ def _steps(profile_home, profile, args):
         ("owner", lambda a: step_owner(profile, a, getattr(args, "owner", False))),
         ("enable", lambda a: step_enable(profile, a)),
         ("config", lambda a: step_config(profile_home, profile, a)),
-        ("spill-cap", lambda a: step_spill_cap(profile_home, profile, a)),
-        ("chat-kanban", lambda a: step_chat_kanban(profile, a)),
-        ("menu-priority", lambda a: step_menu_priority(profile_home, profile, a)),
+        ("spill-cap", lambda a: step_spill_cap(profile, a, args.spill_cap)),
+        ("chat-kanban", lambda a: step_chat_kanban(profile, a, args.chat_kanban)),
+        ("menu-priority", lambda a: step_menu_priority(profile, a, args.telegram_menu)),
         ("profiles", lambda a: step_profiles(profile or "default", args.profile_prefix, a, args.no_profiles)),
         ("other-copies", lambda a: step_other_copies(profile_home, args.profile_prefix, a)),
         ("prompt-budget", lambda a: step_prompt_budget(args.profile_prefix, a)),
-        ("permissions", lambda a: step_permissions(profile_home, args.profile_prefix, a)),
-        ("unit", lambda a: step_unit(profile_home, a, args.no_service)),
+        ("permissions", lambda a: step_permissions(profile_home, profile, args.profile_prefix, a)),
         ("graph-http", lambda a: step_graph_unit(profile_home, a, args.no_service, args.graph_port)),
-        ("proofs-board", lambda a: step_proofs_board(a)),
-        ("proofs-cron", lambda a: step_proofs_cron(profile, a, args.no_cron)),
+        ("proofs-board", lambda a: step_proofs_board(a, args.nightly_proofs and not args.no_cron)),
+        ("proofs-cron", lambda a: step_proofs_cron(profile, profile_home, a, args.no_cron, args.nightly_proofs,
+                                                   args.proofs_deliver)),
         ("retire-crons", lambda a: step_retire_crons(profile, a, args.no_cron)),
     ]
 
@@ -1451,16 +1357,10 @@ def report(profile, profile_home, args):
         print("role profile: %s (%s)" % (name, "present" if os.path.isdir(home) else "MISSING"))
     for line in prompt_report(args.profile_prefix)[0]:
         print(line)
-    graph_path = os.path.join(profile_home, "scripts", "crew_graph.py")
+    graph_path = plugin_script(profile_home, "crew_graph.py")
     print("graph script: %s (%s)" % (graph_path, "present" if os.path.exists(graph_path) else "MISSING"))
     roles_path = os.path.join(profile_home, "roles", "crew", "roles.json")
     print("roles file: %s (%s)" % (roles_path, "present" if os.path.exists(roles_path) else "MISSING"))
-    if args.no_service:
-        print("feed unit: skipped (--no-service)")
-    else:
-        act = subprocess.run(["systemctl", "--user", "is-active", UNIT_NAME],
-                             capture_output=True, text=True)
-        print("feed unit state: %s" % (act.stdout.strip() or act.stderr.strip() or "unknown"))
     if args.no_service:
         print("graph http: skipped (--no-service)")
     else:
@@ -1476,7 +1376,7 @@ def report(profile, profile_home, args):
         print("proofs cron: skipped (--no-cron)")
     else:
         pcid = _cron_id(profile, CRON_PROOFS_NAME)
-        print("proofs cron: %s" % (pcid or "NOT registered"))
+        print("proofs cron: %s" % (pcid or "not registered (--nightly-proofs registers it)"))
 
 
 def main():
@@ -1485,15 +1385,32 @@ def main():
     ap.add_argument("--owner", action="store_true",
                     help="make --profile the owner profile even when another one is recorded")
     ap.add_argument("--check", action="store_true", help="print what would change, change nothing")
-    ap.add_argument("--no-service", action="store_true", help="do not write/enable the feed unit")
+    ap.add_argument("--no-service", action="store_true",
+                    help="write no systemd unit (the local dashboard unit)")
     ap.add_argument("--no-cron", action="store_true",
-                    help="do not register or retire the crew crons (nightly proofs, old heal/observer jobs)")
+                    help="touch no cron job: no nightly proofs even with --nightly-proofs, and the old "
+                         "heal/observer jobs are not retired")
+    ap.add_argument("--nightly-proofs", action="store_true",
+                    help="register the nightly proofs cron (03:00) and the crew-proofs board it runs on")
+    ap.add_argument("--proofs-deliver", default=CRON_PROOFS_DELIVER, metavar="TARGET",
+                    help="where the nightly proofs job delivers its output (default %s: the cron's own output; "
+                         "any Hermes delivery target, e.g. telegram or platform:chat_id)" % CRON_PROOFS_DELIVER)
+    ap.add_argument("--chat-kanban", action="store_true",
+                    help="turn the kanban toolset on for zulip and telegram so /crew can open a card there")
+    ap.add_argument("--telegram-menu", action="store_true",
+                    help="put /crew first in the telegram command menu")
+    ap.add_argument("--spill-cap", action="store_true",
+                    help="raise hooks.output_spill.max_chars on the installing profile above the /crew preload")
     ap.add_argument("--graph-port", type=int, default=GRAPH_PORT,
                     help="local port for the crew graph http service (default %d)" % GRAPH_PORT)
     ap.add_argument("--https-port", type=int, default=8445,
                     help="tailnet https port used with --publish (default 8445)")
     ap.add_argument("--publish", action="store_true",
-                    help="also publish the graph over the tailnet with tailscale serve")
+                    help="also publish the graph over the tailnet with tailscale serve (only --publish-user gets in)")
+    ap.add_argument("--publish-user", default="",
+                    help="the tailnet login allowed on the published dashboard (default: the tailnet's one human login)")
+    ap.add_argument("--publish-tag", default="",
+                    help="tailnet device tags also allowed, comma list (e.g. tag:admin): a tagged device has no login")
     ap.add_argument("--no-profiles", action="store_true",
                     help="do not create/update the role profiles from templates/")
     ap.add_argument("--profile-prefix", default="crew-",
@@ -1523,12 +1440,20 @@ def main():
             return 0
         for name, detail in needed:
             print("would change: %s - %s" % (name, detail))
-            if name == "unit":
-                print(render_unit(profile_home))
             if name == "graph-http":
                 print(render_graph_unit(profile_home, args.graph_port))
         print("%d change(s) needed" % len(needed))
         return 1
+
+    if args.publish and not args.no_service:
+        hosts, user, err = publish_settings(_ts_name(), args.publish_user)
+        if err:
+            print("publish refused: %s - nothing was changed" % err)
+            return 1
+        # the unit carries the host and the login, so the published dashboard answers only its owner
+        tags = ",".join(t.strip() for t in args.publish_tag.split(",") if t.strip())
+        _owner_record_set(publish_hosts="%s,%s:%d" % (hosts, hosts, args.https_port), publish_users=user,
+                          publish_tags=tags)
 
     print("crew installer -> %s" % profile_home)
     for name, fn in steps:
@@ -1543,7 +1468,7 @@ def main():
                              capture_output=True, text=True)
         print("publish: %s" % ((pub.stdout or pub.stderr or "").strip().splitlines()[-1:] or ["?"])[0])
         name = _ts_name()
-        if pub.returncode == 0 and name:      # card links in the feed and the board header point here
+        if pub.returncode == 0 and name:      # card links in the owner's messages and the board header point here
             _owner_record_set(dashboard_url="https://%s:%d" % (name, args.https_port))
     report(profile, profile_home, args)
     return 0

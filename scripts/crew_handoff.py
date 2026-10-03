@@ -16,6 +16,9 @@ import sqlite3
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 KANBAN_DB = os.environ.get("KANBAN_DB", os.path.expanduser("~/.hermes/kanban.db"))
 MAX_COMMENTS = 4
 MAX_WORKSPACE_ENTRIES = 12
@@ -103,18 +106,14 @@ def record_handoff(card_id, text):
     try:
         dup = _rows(conn, "select 1 from task_events where task_id = ? and kind = 'handoff' "
                           "and json_extract(payload, '$.run') is ? limit 1", (card_id, run))
-        if dup:
-            return False
-        conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
-                     "values (?,?,?,?,?)",
-                     (card_id, run, "handoff",
-                      json.dumps({"run": run, "chars": len(text or ""),
-                                  "profile": os.environ.get("CREW_PROFILE") or "",
-                                  "ts": time.time()}), int(time.time())))
-        conn.commit()
     finally:
         conn.close()
-    return True
+    if dup:
+        return False
+    import crew_card        # the crew's one event writer (appends a crew-kind row; no state change)
+    return crew_card._append_card_event(card_id, "handoff", {
+        "run": run, "chars": len(text or ""), "profile": os.environ.get("CREW_PROFILE") or "",
+        "ts": time.time()}, run_id=run, db=KANBAN_DB)
 
 
 def main():

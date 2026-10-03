@@ -13,11 +13,13 @@ the owner's words, the mechanical remedy) are unit tests in tests/test_crew_coor
 
   A  first pass: the cursor is initialised at the newest event and nothing is replayed
   B  a blocked crew card gets a `crew_decision` (retry) carrying the triggering event id; the fix is written
-     into the card body and the card is back in the queue with the kernel's block counter reset
-  C  the same card blocked again lands in `blocked` (not `triage`): the counter reset held
+     into the card body and the card is back in the queue (the block counter stays the kernel's)
+  C  the same card blocked again with the same kind lands in `triage` (the kernel's limiter); a rescope rewrites
+     the card out of it through the kernel's own exit (specify_triage_task)
   G  a card the kernel breaker parked untyped is typed needs_input in place by ask_owner
-  H  a card in `triage` (a second same-kind block) is lifted by a retry
-  K  split opens children under a close-out and archives the original
+  H  a card in `triage` (a second same-kind block) is rewritten out of it by a retry
+  K  split opens children (only the contract's text fields, no proof of their own) under a close-out that runs
+     the split card's proof, and archives the original
   L  the lock: a live pass blocks a second one, a dead pid's lock is taken over
   N  the close rule: a card closed from the CLI (`complete --force`) with no PASS line is recorded as an
      owner_close decision, once and with no model call; one closed on a PASS line is left alone
@@ -142,7 +144,8 @@ def newest_event(cid, kind):
     return r
 
 
-def new_card(title, proof="sh -c 'exit 3'", assignee="crew-worker", extra=None):
+# proof commands Hermes's safety check lets run unattended (`sh -c ...` is flagged and would block the card)
+def new_card(title, proof="false", assignee="crew-worker", extra=None):
     spec = {"role": "worker", "budget": 200000, "goal": title, "artifact": "a file", "lands": "here",
             "audience": "the owner", "done_when": "the file exists", "proof_cmd": proof,
             "coordinator": "proof/scratch"}
@@ -154,7 +157,15 @@ def new_card(title, proof="sh -c 'exit 3'", assignee="crew-worker", extra=None):
     cid = m.group(1) if m else ""
     if not cid:
         raise RuntimeError("card not created: %s" % ((r.stdout or "") + (r.stderr or ""))[-300:])
+    snapshot_proof(cid, proof)
     return cid
+
+
+def snapshot_proof(cid, proof):
+    """The `origin` snapshot open_card writes (crew_card.record_origin): the only command a proof ever runs. A card
+    made with the raw `kanban create` has none, so it has no proof to run, split or close."""
+    sql("insert into task_events (task_id, run_id, kind, payload, created_at) values (?, null, 'origin', ?, ?)",
+        (cid, json.dumps({"proof_cmd": proof.strip(), "note": "proof scratch card", "ts": time.time()}), int(time.time())))
 
 
 def stamp_healed(cid):
@@ -236,8 +247,8 @@ def main():
     check("B: the budget line carries the coordinator's ceiling", re.search(r"(?m)^Budget: 250000 tokens", body)
           is not None, "")
     c = card(cid_a)
-    check("B: the card is back in the queue with the block counter reset",
-          c["status"] in ("ready", "todo") and not c["block_recurrences"] and not c["block_kind"],
+    check("B: the card is back in the queue and the block counter is the kernel's (still 1)",
+          c["status"] in ("ready", "todo") and c["block_recurrences"] == 1,
           "%s recurrences=%s kind=%s" % (c["status"], c["block_recurrences"], c["block_kind"]))
     check("B: exactly one model call was made and the cursor advanced", model_calls() == 1 and
           cursor() >= blocked_ev, "calls=%d cursor=%s" % (model_calls(), cursor()))
@@ -250,9 +261,9 @@ def main():
     check("B2: a pass with no new events changes nothing", not [c for c in rep["cards"] if c["action"] != "skip"]
           and model_calls() == calls_before and len(decisions(cid_a)) == 1, "")
 
-    # ---- C: blocked again lands in blocked, second retry
+    # ---- C: blocked again with the same kind lands in triage, a rescope rewrites it out
     worker_blocks(cid_a, "the proof fails on line 9")
-    check("C: the same-kind re-block lands in `blocked`, not `triage`", card(cid_a)["status"] == "blocked",
+    check("C: the same-kind re-block lands in `triage` (the kernel's limiter)", card(cid_a)["status"] == "triage",
           card(cid_a)["status"])
     queue(json.dumps({"decision": "rescope", "done_when": "the file exists and is non-empty",
                       "fix": "the contract asked for too little"}))
@@ -260,6 +271,10 @@ def main():
     body = card(cid_a)["body"]
     check("C: a rescope rewrites the Done when line and numbers its fix 2",
           "Done when: the file exists and is non-empty" in body and "Coordinator fix 2:" in body, body[-160:])
+    check("C: the card left triage through the kernel's own exit (a `specified` event, status ready/todo)",
+          card(cid_a)["status"] in ("ready", "todo") and
+          bool(rows("select 1 from task_events where task_id = ? and kind = 'specified'", (cid_a,))),
+          card(cid_a)["status"])
 
     # ---- G: an untyped breaker block is typed in place
     cid_g = new_card("proof card G")
@@ -280,14 +295,16 @@ def main():
           card(cid_h)["status"] == "triage", card(cid_h)["status"])
     queue(json.dumps({"decision": "retry", "fix": "different approach"}))
     coordinator()
-    check("H: a retry lifts the card out of triage", card(cid_h)["status"] in ("ready", "todo") and
+    check("H: a retry rewrites the card out of triage", card(cid_h)["status"] in ("ready", "todo") and
+          "Coordinator fix 1: different approach" in card(cid_h)["body"] and
           decisions(cid_h)[-1].get("applied") is True, card(cid_h)["status"])
 
     # ---- K: split
     cid_k = new_card("proof card K")
     worker_blocks(cid_k, "too big")
     child = {"title": "part one", "goal": "part one", "role": "worker", "artifact": "one.txt", "lands": "here",
-             "audience": "the owner", "done_when": "one.txt exists", "proof_cmd": "test -f one.txt"}
+             "audience": "the owner", "done_when": "one.txt exists", "proof_cmd": "test -f one.txt",
+             "assignee": "owner-chat", "model": "evil-model", "provider": "evil"}
     child2 = dict(child, title="part two", goal="part two", artifact="two.txt", done_when="two.txt exists",
                   proof_cmd="test -f two.txt")
     queue(json.dumps({"decision": "split", "children": [child, child2]}))
@@ -297,6 +314,15 @@ def main():
     check("K: a split opens the children and archives the original",
           ds and ds[-1].get("decision") == "split" and ds[-1].get("applied") is True and len(kids) == 2 and
           card(cid_k)["status"] == "archived", "%s %d kids" % (card(cid_k)["status"], len(kids)))
+    kid = card(kids[0]["id"]) if kids else {}
+    check("K: a child ignores the model's assignee and pin and has no proof of its own",
+          kid.get("assignee") not in (None, "owner-chat") and not kid.get("model_override") and "Verify: closeout" in (kid.get("body") or "")
+          and "test -f one.txt" not in (kid.get("body") or ""),
+          "%s pin=%s" % (kid.get("assignee"), kid.get("model_override")))
+    close = rows("select body from tasks where title like 'close-out: %' order by created_at desc limit 1")
+    check("K: the close-out runs the split card's own proof after the children check",
+          bool(close) and "closeout --cards" in close[0]["body"] and "&& (false)" in close[0]["body"],
+          (close[0]["body"][-120:] if close else "no close-out"))
 
     # ---- L: the lock
     lock = os.path.join(HOME, "crew", "coordinator.lock")
@@ -312,7 +338,7 @@ def main():
 
     # ---- N: the owner's close is recorded, a proven close is not
     calls_before = model_calls()
-    cid_n = new_card("proof card N", proof="sh -c 'exit 3'")
+    cid_n = new_card("proof card N", proof="false")
     r = cli("complete", cid_n, "--force", "--summary", "the owner says it is done")
     done_ev = newest_event(cid_n, "completed")
     report = coordinator()
@@ -324,7 +350,7 @@ def main():
     coordinator()
     check("N: the next pass does not record it again, and no model was asked",
           len(decisions(cid_n)) == 1 and model_calls() == calls_before, "%d decisions" % len(decisions(cid_n)))
-    cid_n2 = new_card("proof card N2", proof="sh -c 'exit 0'")
+    cid_n2 = new_card("proof card N2", proof="true")
     v = subprocess.run([sys.executable, os.path.join(HERE, "crew_card.py"), "verdict", "--card", cid_n2, "--by",
                         "crew-worker"], env=ENV, capture_output=True, text=True, timeout=200)
     cli("complete", cid_n2, "--summary", "proven")
@@ -336,7 +362,7 @@ def main():
           "%s rc=%d %s" % (card(cid_n2)["status"], v.returncode, json.dumps(ds2)[:80]))
 
     # ---- O: two FAILs in a verifier's review run go back to the writer
-    cid_o = new_card("proof card O", proof="sh -c 'exit 3'")
+    cid_o = new_card("proof card O", proof="false")
     cli("claim", cid_o)
     cli("request-review", cid_o, "--summary", "done", "--reviewer", "crew-verifier")
     reviewing = crew_proof_board.claim_review(DB, cid_o, REAL_HOME)
@@ -356,7 +382,7 @@ def main():
           json.loads(back[0]["payload"]).get("reason", "")[:80] if back else "no changes_requested event")
 
     # ---- P: two FAILs in the writer's own run block the card as transient; the coordinator decides
-    cid_p = new_card("proof card P", proof="sh -c 'exit 3'")
+    cid_p = new_card("proof card P", proof="false")
     cli("claim", cid_p)
     for _ in range(2):
         r = subprocess.run([sys.executable, os.path.join(HERE, "crew_card.py"), "verdict", "--card", cid_p, "--by",
@@ -374,7 +400,7 @@ def main():
           ds and ds[-1].get("decision") == "retry" and ds[-1].get("applied") and model_calls() == calls_before + 1
           and card(cid_p)["status"] in ("ready", "todo"), "%s %s" % (card(cid_p)["status"], json.dumps(ds[-1:])[:80]))
     check("P: the coordinator's facts carried both FAIL lines (by the writer profile)",
-          len(re.findall(r"FAIL rc=3 by crew-worker", open(last_facts()).read() if last_facts() else "")) == 2,
+          len(re.findall(r"FAIL rc=1 by crew-worker", open(last_facts()).read() if last_facts() else "")) == 2,
           last_facts() or "no facts file")
 
     if FAILS:

@@ -14,7 +14,10 @@ its cursor, and for every crew card that needs something it
        verify   {}                                      run the card's proof now; PASS closes, FAIL asks again once
        retry    {fix, model?, provider?, budget?, constraints?}   the fix is written into the card, then it runs again
        rescope  {goal?, done_when?, proof_cmd?}         the contract lines are rewritten, then retry
-       split    {children: [contract, ...]}             independent cards under one close-out
+       split    {children: [contract, ...]}             independent cards; the card's own proof closes them
+       revise_script {why, delegate?}                   the proof SCRIPT changed since it first ran: accept it as it is
+                                                        (recorded with `why`, then verified) or, with delegate, the
+                                                        verifier rewrites it (never the writer). Never the proof command.
        ask_owner {question}                             one sentence, answerable in one line
        abandon  {why}                                   archive; only when the owner's own words say so
 
@@ -49,6 +52,8 @@ if HERE not in sys.path:
 import crew_card  # noqa: E402
 import crew_handoff  # noqa: E402
 import crew_heal  # noqa: E402
+import crew_notify  # noqa: E402
+import crew_safety  # noqa: E402
 
 # The events that can make a crew card need something. Everything else on the board (heartbeats, comments,
 # claims, the coordinator's own unblock and decision rows) is noise to this pass: it advances the cursor and
@@ -56,10 +61,10 @@ import crew_heal  # noqa: E402
 EVENT_KINDS = ("blocked", "block_loop_detected", "gave_up", "crashed", "timed_out", "protocol_violation",
                "stale", "reclaimed", "respawn_guarded", "completed")
 # Of those, the ones that put a card where only a decision moves it (status blocked / triage).
-STOP_EVENT_KINDS = ("blocked", "block_loop_detected", "gave_up")
+STOP_EVENT_KINDS = crew_notify.STOP_EVENT_KINDS
 # What the model may answer. `owner_close` and `audit` are also crew_decision kinds but only the loop writes them
 # (audit_completion).
-DECISIONS = ("close", "verify", "retry", "rescope", "split", "ask_owner", "abandon")
+DECISIONS = ("close", "verify", "retry", "rescope", "split", "revise_script", "ask_owner", "abandon")
 FIX_DECISIONS = crew_card.FIX_DECISIONS
 MAX_COORDINATOR_RETRIES = 2
 MAX_AUDIT_FOLLOWUPS = 2           # follow-up cards chained after failed audits before the owner is asked
@@ -207,13 +212,14 @@ def decisions_of(ctx, card_id):
 
 
 def awaiting_owner(ctx, card_id, decisions):
-    """The last decision asked the owner and nothing has moved the card since (no unblock, no new run)."""
+    """The last decision asked the owner and nothing has moved the card since (no unblock, no new run, no exit
+    from triage: the kernel's `specified` event is what /crew-unstuck and a coordinator rewrite leave)."""
     asked = [d for d in decisions if d.get("decision") == "ask_owner"]
     if not asked:
         return False
     since = asked[-1]["_id"]
     moved = q(ctx, "select 1 from task_events where task_id = ? and id > ? and kind in "
-                   "('unblocked', 'claimed', 'spawned', 'completed', 'promoted_manual') limit 1",
+                   "('unblocked', 'specified', 'claimed', 'spawned', 'completed', 'promoted_manual') limit 1",
               (card_id, since))
     return not moved
 
@@ -260,6 +266,9 @@ def build_facts(ctx, card, decisions, extra=""):
         val = crew_card.field(body, key)
         if val:
             contract.append("%s: %s" % (key, val))
+    inputs = crew_card.contract_inputs(body)
+    if inputs:        # the owner's material: a result is judged against it as well as against Done when
+        contract.append("Inputs:\n" + inputs)
     sections.append("## Contract\n" + "\n".join(contract))
     runs = q(ctx, "select id, profile, status, outcome, started_at, ended_at, summary, error from task_runs "
                   "where task_id = ? order by id desc limit 8", (cid,))
@@ -275,6 +284,12 @@ def build_facts(ctx, card, decisions, extra=""):
                                      (v.get("command") or "")[:120],
                                      " ".join(str(v.get("output_head") or "").split())[:300])
         for v in verdicts) or "(none)"))
+    vb = crew_card.verifier_block(cid)
+    if vb:
+        sections.append("## Verifier's findings (the verifier blocked this card, run %s)\n%s\n"
+                        "A passing proof does not answer these: the fix goes to the writer as a retry "
+                        "(fix = these findings, concretely), or rescope, or ask_owner. Not verify, not close." % (
+                            vb["run"], vb["reason"] or "(no reason recorded; read the verifier's comment on the card)"))
     sections.append("## Ledger\nused %s of %s" % (used, budget))
     sections.append("## Earlier coordinator decisions on this card\n" + ("\n".join(
         "- %s %s" % (d.get("decision"), json.dumps({k: v for k, v in d.items()
@@ -308,10 +323,15 @@ Answer in a few lines of reasoning, then end with exactly ONE JSON object on the
   {"decision": "retry", "fix": "<what is different this time, concrete>", "model": "..", "provider": "..",
    "budget": N, "constraints": ".."}                    fix is required; the rest optional
   {"decision": "rescope", "goal": "..", "done_when": "..", "proof_cmd": ".."}   when the contract itself is wrong
-  {"decision": "split", "children": [{"title","goal","role","artifact","lands","audience","done_when","proof_cmd"}]}
+  {"decision": "split", "children": [{"title","goal","role","artifact","lands","audience","done_when","constraints"}]}
+                                                        children carry no proof_cmd, assignee or model: the card's own proof closes the tree
+  {"decision": "revise_script", "why": "..", "delegate": false}   only when the proof was refused because its script
+                                                        changed: accept the script as it is now, or delegate: true so the verifier rewrites it
   {"decision": "ask_owner", "question": "<one sentence the owner can answer in one line>"}
   {"decision": "abandon", "why": "..."}                 only when the owner's own words scrap the work
-Ask the owner only when a human decision is needed; never repeat a fix the decisions above already tried."""
+Ask the owner only when a human decision is needed; never repeat a fix the decisions above already tried.
+A card's `Inputs` (paths, URLs, quoted text the owner gave) are part of the contract: judge a result against them as
+well as against Done when."""
 
 
 # ------------------------------------------------------------------------------------ the model call
@@ -326,7 +346,9 @@ def default_decider(ctx, facts_path):
         cmd = [crew_card.hermes_bin(), "-p", crew_card.role_profile("coordinator"), "chat",
                "--query-file", facts_path, "-Q", "--max-turns", "6", "--run-budget", "300",
                "--reasoning", "medium", "-t", "file,terminal"]
-    env = dict(os.environ, CREW_COORDINATOR_TURN="1")
+    # Scrubbed like a proof: `hermes -p crew-coordinator` loads its provider keys from its own profile .env
+    # (hermes_cli/main.py load_hermes_dotenv under the profile's HERMES_HOME), not from what it inherits.
+    env = crew_safety.proof_env({"CREW_COORDINATOR_TURN": "1"})
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=MODEL_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
@@ -364,7 +386,7 @@ def check_decision(dec):
         return "a split needs a non-empty `children` list"
     if kind == "ask_owner" and not text("question"):
         return "ask_owner needs a `question`"
-    if kind in ("close", "abandon") and not text("why"):
+    if kind in ("close", "abandon", "revise_script") and not text("why"):
         return "%s needs a `why`" % kind
     return ""
 
@@ -396,7 +418,8 @@ def ask_model(ctx, card, decisions, extra=""):
 
 
 def sh(*args, timeout=180):
-    done = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout,
+                          env=crew_safety.proof_env())
     return done.returncode, ((done.stdout or "") + (done.stderr or "")).strip()
 
 
@@ -406,13 +429,6 @@ def kanban(*args, timeout=180):
 
 def set_body(card_id, body):
     return kanban("edit", card_id, "--body", body)
-
-
-def rewrite_line(body, label, value):
-    """Replace the `Label: ...` line, or append it: one owner for editing a contract line."""
-    line = "%s: %s" % (label, " ".join(str(value).split()))
-    new, hits = re.subn(r"(?mi)^\s*%s:.*$" % re.escape(label), lambda _m: line, body or "", count=1)
-    return new if hits else (body or "").rstrip() + "\n" + line + "\n"
 
 
 def coordinator_fix_body(body, n, dec):
@@ -435,16 +451,20 @@ def clamp_budget(value):
     return max(0, min(value, ceiling)) or None
 
 
-def apply_retry(ctx, card, dec, decisions, with_contract=False):
+def apply_retry(ctx, card, dec, decisions, with_contract=False, lift=True):
+    """`lift=False`: a stopped card is written (fix, budget, ledger) but stays stopped: the caller moves it on in one
+    step of its own (revise_script delegate: crew_card.send_to_verifier lifts and requests review together)."""
     cid, body = card["id"], card.get("body") or ""
     n = fix_count(decisions) + 1
     if with_contract:
-        for key, label in (("goal", "GOAL"), ("done_when", "Done when"), ("proof_cmd", "proof command")):
+        # the proof command is not a contract line the loop may rewrite: see ask_proof_change
+        for key, label in (("goal", "GOAL"), ("done_when", "Done when")):
             if str(dec.get(key) or "").strip():
-                body = rewrite_line(body, label, dec[key])
+                body = crew_card.rewrite_line(body, label, dec[key])
     body = coordinator_fix_body(body, n, dec) if str(dec.get("fix") or "").strip() else body
     notes = []
-    if body != (card.get("body") or ""):
+    stopped = card["status"] in ("blocked", "triage")
+    if body != (card.get("body") or "") and not stopped:
         rc, out = set_body(cid, body)
         if rc != 0:
             return False, "could not write the fix into the card: %s" % out[-160:]
@@ -454,32 +474,94 @@ def apply_retry(ctx, card, dec, decisions, with_contract=False):
                                     "task_class": "coordinator", "why": "coordinator decision"})
         notes.append("pinned %s/%s" % (dec["provider"], dec["model"]))
     if card["status"] in ("blocked", "triage"):
-        res = crew_card.retry_card(cid, budget=clamp_budget(dec.get("budget")), profile=None)
+        # one write of the rewritten card: a triaged card leaves triage through the kernel's own exit
+        # (`specify_triage_task` with the new approach), a blocked one is edited and then unblocked
+        res = crew_card.retry_card(cid, budget=clamp_budget(dec.get("budget")), profile=None, body=body, unblock=lift)
         if not res.get("ok") or (res.get("unblock") or {}).get("rc") not in (0, None):
             return False, "retry did not lift the card: %s" % json.dumps(res.get("unblock") or res)[:160]
-        notes.append("ceiling %s, card %s" % (res["budget"], (res.get("unblock") or {}).get("status")))
+        if body != (card.get("body") or ""):
+            notes.append("fix %d written" % n)
+        if lift:
+            back = crew_card.hand_to_writer(cid)         # not back to the verifier with nothing changed
+            if back["reopened"] or back["assigned"]:
+                notes.append("handed back to the writer %s" % (back["assigned"] or ""))
+        notes.append("ceiling %s, card %s" % (res["budget"], (res.get("unblock") or {}).get("status") or card["status"]))
     else:
         crew_card.release_hold(cid)
         notes.append("hold released")
     return True, "; ".join(notes)
 
 
+SPLIT_CHILD_KEYS = ("title", "goal", "role", "artifact", "lands", "audience", "done_when", "constraints")
+
+
+def split_child(ch, origin, coordinator, inputs=""):
+    """A child card from the model's JSON: only the contract's own text fields are taken. The assignee and skills
+    are the role's profile (open_card derives them from `role`), the model, provider and runtime are the
+    defaults, the budget is clamped, and there is no proof command: the split card's owner-confirmed proof
+    closes the tree (run_plan closeout_proof). Anything else the model wrote - an assignee, a model pin, a
+    proof_cmd, a parent - is dropped. Every child starts from the split card's own `Inputs` (the owner's material)."""
+    out = {k: ch[k] for k in SPLIT_CHILD_KEYS if isinstance(ch.get(k), str)}
+    if inputs:
+        out["inputs"] = inputs
+    budget = clamp_budget(ch.get("budget"))
+    if budget:
+        out["budget"] = budget
+    out["origin"], out["coordinator"] = origin, coordinator
+    return out
+
+
 def apply_split(ctx, card, dec):
-    origin = crew_card.field(card.get("body") or "", "Origin") or ""
-    children = []
-    for ch in dec["children"]:
-        ch = dict(ch)
-        ch.setdefault("origin", origin)
-        ch.setdefault("coordinator", crew_card.field(card.get("body") or "", "Coordinator"))
-        children.append(ch)
-    spec = {"title": card.get("title"), "goal": crew_card.field(card.get("body") or "", "GOAL") or card.get("title"),
+    body = card.get("body") or ""
+    proof = crew_card.close_proof_command(card["id"])
+    if not proof:
+        return False, "the card has no owner-confirmed proof command to close the split tree with"
+    origin = crew_card.field(body, "Origin") or ""
+    coordinator = crew_card.field(body, "Coordinator")
+    inputs = crew_card.contract_inputs(body)
+    children = [split_child(ch, origin, coordinator, inputs) for ch in dec["children"] if isinstance(ch, dict)]
+    spec = {"title": card.get("title"), "goal": crew_card.field(body, "GOAL") or card.get("title"),
             "children": children}
-    res = crew_card.run_plan(spec)
+    res = crew_card.run_plan(spec, closeout_proof=proof)
     ids = [c.get("id") for c in res["children"]]
     kanban("comment", card["id"], "Split by the coordinator into %s (close-out %s)." % (
         ", ".join(ids), res["closeout"].get("id")))
     kanban("archive", card["id"])
     return True, "children %s, close-out %s, original archived" % (", ".join(ids), res["closeout"].get("id"))
+
+
+def answer_line(card_id, flag):
+    return 'python3 "%s" proof-answer --card %s %s' % (os.path.join(HERE, "crew_card.py"), card_id, flag)
+
+
+def proof_blocked_ask(card_id, cmd, reason):
+    """The ask_owner decision for a proof Hermes's safety floor refused. The owner answers `brave` (this card)
+    or sets /crew-safety brave for good; `proof_ask` is what `crew_card.py proof-answer` closes."""
+    reason = " ".join(str(reason).split())
+    return {"decision": "ask_owner", "proof_ask": {"kind": "blocked", "command": cmd, "reason": reason},
+            "question": "Proof blocked by Hermes safety: `%s` (%s). Reply `brave` to run it for this card, or "
+                        "`/crew-safety brave` to stop being asked." % (cmd[:90], reason[:70]),
+            "detail": "Proof command: %s\nHermes: %s\nReply `brave` to run it for this card, or `/crew-safety brave` "
+                      "to stop being asked.\nRecord the answer: %s" % (cmd, reason, answer_line(card_id, "--brave"))}
+
+
+def proof_change_ask(card_id, old, new):
+    """The ask_owner decision for a coordinator rescope that names a different proof command. Models propose,
+    the owner confirms: nothing runs until `proof-answer` writes the new snapshot."""
+    return {"decision": "ask_owner", "proof_ask": {"kind": "rescope", "proposed": new},
+            "question": "The coordinator proposes a new proof command: `%s` (now: `%s`). Reply yes to accept it."
+                        % (new[:100], (old or "none")[:70]),
+            "detail": "Proposed proof command: %s\nCurrent: %s\nAccept: %s (add --brave to also skip Hermes's "
+                      "dangerous-command check for this card)" % (new, old or "(none)", answer_line(card_id, "--yes"))}
+
+
+def blocked_ask_for(card, out=""):
+    """proof_blocked_ask for the card's snapshot command, the reason being Hermes's (re-asked, so the words are
+    the detector's own, not a slice of the verdict output)."""
+    cmd = crew_card.close_proof_command(card["id"])
+    _ok, reason = crew_safety.check_proof(cmd, crew_safety.proof_mode(card["id"], cmd))
+    reason = reason or crew_safety.script_change(card["id"], cmd)
+    return proof_blocked_ask(card["id"], cmd, reason or (out.strip().splitlines() or ["blocked"])[-1])
 
 
 def apply_ask_owner(ctx, card, question, detail=""):
@@ -552,10 +634,25 @@ def resolve(ctx, card, decisions, trigger):
             return {"decision": "ask_owner", "question": "The coordinator could not decide (%s). What should "
                                                          "happen to this card?" % problem[:160]}, "error", False
         return {"decision": "error", "problem": problem}, "error", True
+    vb = crew_card.verifier_block(card["id"])
+    if vb and dec["decision"] in ("verify", "close"):
+        # the verifier blocked this card on its own judgement: a passing proof must not override it
+        why = " ".join(vb["reason"].split())[:700] or "see the verifier's comment on the card"
+        dec, problem = ask_model(ctx, card, decisions, "The verifier blocked this card on its own judgement, so "
+                                 "verify/close is refused (the proof passing does not answer it): %s\nAnswer retry "
+                                 "(fix = what the verifier found), rescope or ask_owner." % why)
+        if dec is None or dec["decision"] in ("verify", "close"):
+            return {"decision": "ask_owner", "question": "The verifier blocked this card: %s. Fix it with the "
+                                                         "writer, rescope, or drop the card?" % why[:300]}, "verifier", False
+        return dec, "model", False
     if dec["decision"] == "verify" or (dec["decision"] == "close" and not pass_line(card["id"])):
         if ctx.dry:                        # running the proof writes a verdict line: a dry pass only reports
             return dec, "model", False
         rc, out = run_verdict(card["id"])
+        if rc == crew_card.PROOF_BLOCKED and crew_safety.is_script_block(script_reason(card)):
+            return resolve_script(ctx, card, decisions, script_reason(card))
+        if rc == crew_card.PROOF_BLOCKED:
+            return blocked_ask_for(card, out), "verify", False
         if rc == 0:
             return {"decision": "close", "why": "verdict PASS: proof exits 0 now"}, "verify", False
         again, problem = ask_model(ctx, card, decisions, "The proof was run for you and FAILED (rc=%s):\n%s"
@@ -568,16 +665,90 @@ def resolve(ctx, card, decisions, trigger):
     return dec, "model", False
 
 
+def script_reason(card):
+    """Why the card's proof script may not run ('' when it may): crew_safety.script_change, read-only."""
+    return crew_safety.script_change(card["id"], crew_card.close_proof_command(card["id"]))
+
+
+def accept_script(card, why):
+    """The coordinator accepts the proof script as it is now: its hash is recorded with the reason."""
+    return crew_card.record_script_hashes(card["id"], crew_safety.script_hashes(crew_card.close_proof_command(card["id"])),
+                                          by="coordinator", why=" ".join(str(why).split())[:300])
+
+
+def resolve_script(ctx, card, decisions, reason):
+    """(decision, source, pending) for a proof refused because its script changed since it first ran. The owner
+    is not asked: the coordinator decides again with that fact (revise_script, retry on a restored script, ...).
+    An accepted script is verified right away; no usable answer is the generic owner question of `resolve`."""
+    again, problem = ask_model(ctx, card, decisions, "The proof was refused: %s. The writer may not change the proof "
+                                                     "script on its own. Accept it (revise_script, with why), have the "
+                                                     "verifier rewrite it (revise_script, delegate), or retry." % reason)
+    if again is None or again["decision"] in ("verify", "close"):
+        return {"decision": "ask_owner", "question": "The proof script changed and the coordinator could not decide "
+                                                     "what to do (%s). What should happen to this card?"
+                                                     % (problem or reason)[:160]}, "verify", False
+    if again["decision"] == "revise_script" and not again.get("delegate"):
+        accept_script(card, again["why"])
+        rc, out = run_verdict(card["id"])
+        if rc == 0:
+            return {"decision": "close", "why": "script revised by the coordinator (%s); verdict PASS"
+                                                % " ".join(str(again["why"]).split())[:120]}, "verify", False
+        first = next((ln for ln in out.splitlines() if ln.strip()), "proof failed")
+        return {"decision": "ask_owner", "question": "The proof fails (%s). Fix it, change it, or drop the "
+                                                     "card?" % first[:160]}, "verify", False
+    return again, "model", False
+
+
+def apply_revise_script(ctx, card, dec, decisions):
+    """revise_script with delegate: the VERIFIER rewrites the script, never a writer. The authorization is an event
+    written here from the decision, the card says so in a `Proof script:` body line, and the card goes to the
+    verifier's review step (crew_card.send_to_verifier); the verifier's next run records the new hash with this
+    reason. Without delegate the script is accepted as it is now and the card runs again as a retry."""
+    why = " ".join(str(dec.get("why") or "").split())[:300]
+    if not dec.get("delegate"):
+        accept_script(card, why)
+        dec = dict(dec, fix="the proof script was accepted as it is now: %s. Run the proof again." % why)
+        return apply_retry(ctx, card, dec, decisions)
+    crew_card.authorize_script_revision(card["id"], why)
+    body = crew_card.rewrite_line(card.get("body") or "", "Proof script", "verifier to revise - %s" % why)
+    if body != (card.get("body") or "") and card["status"] not in ("blocked", "triage"):
+        rc, out = set_body(card["id"], body)
+        if rc != 0:
+            return False, "could not write the Proof script line into the card: %s" % out[-160:]
+    ok, note = apply_retry(ctx, dict(card, body=body), dict(dec, fix=""), decisions, lift=False)   # send_to_verifier lifts it
+    if not ok:
+        return ok, note
+    res = crew_card.send_to_verifier(card["id"], "proof script revision: %s" % why)
+    if not res.get("ok"):
+        return False, "the card could not go to the verifier: %s" % res.get("why")
+    return True, "%s; sent to the verifier (%s)" % (note, res.get("why"))
+
+
 def apply_decision(ctx, card, decisions, dec):
     kind = dec["decision"]
+    if kind == "revise_script":
+        return apply_revise_script(ctx, card, dec, decisions)
     if kind == "retry":
         return apply_retry(ctx, card, dec, decisions)
     if kind == "rescope":
-        return apply_retry(ctx, card, dec, decisions, with_contract=True)
+        new = str(dec.get("proof_cmd") or "").strip()
+        old = crew_card.close_proof_command(card["id"])
+        if not new or new == old:
+            return apply_retry(ctx, card, dec, decisions, with_contract=True)
+        # A different proof command is the owner's to confirm. Goal and done-when apply now; the card stays
+        # stopped until the answer writes the new snapshot (crew_card.py proof-answer), which also lifts it.
+        body = card.get("body") or ""
+        for key, label in (("goal", "GOAL"), ("done_when", "Done when")):
+            if str(dec.get(key) or "").strip():
+                body = crew_card.rewrite_line(body, label, dec[key])
+        if body != (card.get("body") or ""):
+            set_body(card["id"], body)
+        dec.update(proof_change_ask(card["id"], old, new))     # recorded as the ask it became
+        return apply_ask_owner(ctx, card, dec["question"], dec["detail"])
     if kind == "split":
         return apply_split(ctx, card, dec)
     if kind == "ask_owner":
-        return apply_ask_owner(ctx, card, str(dec["question"]))
+        return apply_ask_owner(ctx, card, str(dec["question"]), str(dec.get("detail") or ""))
     if kind == "close":
         return apply_close(ctx, card, str(dec.get("why") or ""))
     if kind == "abandon":
@@ -603,14 +774,20 @@ def open_audit_followup(card, rc, out, blocked=False):
     c = crew_card.parse_contract(body)
     n = audit_followup_number(body) + 1
     head = " ".join((out or "").split())[-240:]
-    note = ("Audit follow-up %d of %s: after the card was completed its proof command failed again (rc=%s): %s"
-            % (n, card["id"], rc, head))
+    what = "could not run (blocked by Hermes safety)" if rc == crew_card.PROOF_BLOCKED else "failed again"
+    note = ("Audit follow-up %d of %s: after the card was completed its proof command %s (rc=%s): %s"
+            % (n, card["id"], what, rc, head))
     c["constraints"] = " | ".join(x for x in (c.get("constraints") or "", note) if x)
     c["title"] = "audit follow-up: %s" % (card.get("title") or c.get("goal") or card["id"])
     c["coordinator"] = crew_card.field(body, "Coordinator") or ""
     c["budget"] = c.get("budget") or crew_card.default_budget(c["role"])
+    c["proof_cmd"] = crew_card.close_proof_command(card["id"])       # the snapshot, never the body line
+    c["proof_mode"] = crew_card.proof_snapshot_mode(card["id"])      # and the owner's choice, carried over
     c["verify"] = crew_card.default_verify(c)
-    return crew_card.open_card(c, parents=[card["id"]], initial_status="blocked" if blocked else None)
+    res = crew_card.open_card(c, parents=[card["id"]], initial_status="blocked" if blocked else None)
+    if res.get("id"):       # the follow-up fixes the work, not the proof: it starts with the script hashes bound
+        crew_card.carry_script_hashes(card["id"], res["id"])
+    return res
 
 
 def audit_proof(ctx, card, event):
@@ -623,7 +800,7 @@ def audit_proof(ctx, card, event):
     body = card.get("body") or ""
     if (crew_card.field(body, "Role") or "").strip().lower() not in crew_card.WRITER_ROLES:
         return {"detail": "completed: no proof to audit"}
-    cmd = crew_card.close_proof_command(card["id"], body)
+    cmd = crew_card.close_proof_command(card["id"])
     if not cmd:
         return {"detail": "completed: no proof command to re-run"}
     if ctx.dry:
@@ -637,6 +814,21 @@ def audit_proof(ctx, card, event):
         return {"action": "audit pass", "detail": dec["why"]}
     rc, out = run_verdict(card["id"], for_event=event["id"])
     first = next((ln for ln in out.splitlines() if ln.strip()), "")
+    if rc == crew_card.PROOF_BLOCKED and crew_safety.is_script_block(script_reason(card)):
+        rc = 1          # the script was edited after the card finished: a failed audit, the follow-up redoes it
+    if rc == crew_card.PROOF_BLOCKED:
+        # Not a failure: the safety floor refused the proof. The question rides on a blocked follow-up (a done
+        # card can not be blocked, and crew_notify alerts on blocked ones), exactly as at the follow-up cap.
+        why = blocked_ask_for(card, out)["proof_ask"]
+        res = open_audit_followup(card, rc, out, blocked=True)
+        ask = proof_blocked_ask(res["id"], why["command"], why["reason"])      # answered on the follow-up card
+        held = crew_card.card_row(res.get("id")) or ("", "", "", "", "")
+        ok, result = apply_ask_owner(ctx, {"id": res["id"], "status": held[2], "block_kind": ""},
+                                     ask["question"], ask["detail"])
+        record_decision(ctx, {"id": res["id"]}, event, ask, result, ok)
+        dec = {"decision": "audit", "outcome": "blocked", "followup": res.get("id"), "why": ask["question"]}
+        record_decision(ctx, card, event, dec, "owner asked on %s" % res.get("id"), ok)
+        return {"action": "audit blocked: ask_owner", "detail": "asked on %s: %s" % (res.get("id"), ask["question"][:120])}
     if rc == 0:
         dec = {"decision": "audit", "outcome": "pass", "why": "the proof command passes again after completion"}
         record_decision(ctx, card, event, dec, dec["why"], True)
@@ -645,7 +837,7 @@ def audit_proof(ctx, card, event):
            % (rc, out[-1200:]))
     try:
         if audit_followup_number(body) >= MAX_AUDIT_FOLLOWUPS:
-            # A done card can not be blocked and the feed alerts on blocked ones: the question rides on a follow-up
+            # A done card can not be blocked and crew_notify alerts on blocked ones: the question rides on a follow-up
             # card opened already blocked, so it reaches the owner through the same ask_owner alert as any other.
             question = ("This card was re-done %d times and its proof still fails after completion (%s). Fix it, "
                         "change the proof, or drop it?" % (MAX_AUDIT_FOLLOWUPS, " ".join(first.split())[:160]))
@@ -714,6 +906,9 @@ def handle_card(ctx, card_id, events):
     if card["status"] in ("archived", "done"):
         out["detail"] = card["status"]
         return out
+    if crew_card.parked_by_owner(ctx.db, card_id):
+        out["detail"] = "stopped by the owner (/crew-stop): no decision until /crew-unstuck"
+        return out
     newest = events[-1]
     if stopped_after(ctx, card_id, newest["id"]):
         out["detail"] = "stopped by the owner"
@@ -723,6 +918,9 @@ def handle_card(ctx, card_id, events):
         out["detail"] = "waiting for the owner's answer"
         return out
     heal = crew_heal.heal_card(card, ctx.dry)
+    if heal and heal.get("blocked") and not crew_safety.is_script_block(heal["blocked"]):
+        # the stale-block proof was refused by the safety floor: ask, don't decide (a changed script is decided)
+        heal = dict(heal, proof_ask=proof_blocked_ask(card_id, heal["command"], heal["blocked"]))
     if heal and heal.get("fixed"):
         out.update(action="heal:%s" % heal["class"], detail=heal["action"])
         return out
@@ -736,7 +934,10 @@ def handle_card(ctx, card_id, events):
     if any(d.get("for_event") == trigger["id"] and d.get("decision") != "error" for d in decisions):
         out["detail"] = "already decided for event %s" % trigger["id"]
         return out
-    dec, source, pending = resolve(ctx, card, decisions, trigger)
+    if heal and heal.get("proof_ask"):
+        dec, source, pending = heal["proof_ask"], "heal", False
+    else:
+        dec, source, pending = resolve(ctx, card, decisions, trigger)
     if dec["decision"] == "error":
         out.update(action="error", detail=dec["problem"], pending=True)
         if not ctx.dry:
@@ -772,14 +973,27 @@ def has_work(board=None):
         if not os.path.exists(db):
             return False
         cursor = load_cursor(board)
-        if cursor is None:
-            return True
+        if cursor is None or crew_notify.has_pending(crew_notify.state_file(board)):
+            return True               # a send that failed last pass waits for its retry (crew_notify)
         marks = ",".join("?" * len(EVENT_KINDS))
         rows = q(types.SimpleNamespace(db=db), "select 1 from task_events where id > ? and kind in (%s) limit 1"
                  % marks, (cursor,) + EVENT_KINDS)
         return bool(rows)
     except Exception:  # noqa: BLE001
         return True
+
+
+def notify_baseline(db, board=None):
+    """When the owner's first notify run counts history from: the time of the event this loop's cursor sits on.
+    What the coordinator had not yet handled when notify was installed is new to the owner too; everything
+    before it is old. None (now) when there is no cursor yet."""
+    try:
+        cursor = load_cursor(board)
+        rows = q(types.SimpleNamespace(db=db), "select created_at from task_events where id = ?", (cursor,)) \
+            if cursor is not None else []
+        return rows[0]["created_at"] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def run_pass(ctx, only_card=None, since=None):
@@ -822,6 +1036,7 @@ def run_pass(ctx, only_card=None, since=None):
 
 
 def main():
+    crew_card.reexec_under_hermes_python(os.path.abspath(__file__))     # leaving triage needs hermes_cli
     ap = argparse.ArgumentParser(description="the crew coordinator loop: one pass")
     ap.add_argument("--once", action="store_true", help="one pass and exit (the only mode)")
     ap.add_argument("--board", default=None, help="board slug (the dispatch tick names it)")
@@ -845,8 +1060,15 @@ def main():
         print("another coordinator pass holds the lock")
         return 3
     try:
-        report = run_pass(Ctx(db, a.board, a.dry_run, a.probe, say=(lambda *_: None) if a.json else print),
-                          only_card=a.card, since=a.since)
+        say = (lambda *_: None) if a.json else print
+        baseline = notify_baseline(db, a.board)
+        report = run_pass(Ctx(db, a.board, a.dry_run, a.probe, say=say), only_card=a.card, since=a.since)
+        if not a.dry_run:     # the owner's return path rides on the pass: done, a new question, an abandon
+            try:
+                report["notified"] = [list(n) for n in crew_notify.run(db, crew_notify.state_file(a.board), say=say,
+                                                                baseline=baseline)]
+            except Exception as exc:  # noqa: BLE001 - a failed message never fails the pass
+                say("crew notify error: %s: %s" % (type(exc).__name__, str(exc)[:160]))
     finally:
         if not a.dry_run:
             drop_lock(a.board)

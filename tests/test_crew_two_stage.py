@@ -71,6 +71,13 @@ class ReviewGuardTests(unittest.TestCase):
             self.assertIsNone(self.plug._review_guard("kanban_request_review", {"summary": "done"}))
         repin.assert_called_once_with("t_w")
 
+    def test_the_verifier_never_requests_review_it_would_become_the_implementer(self):
+        self.card("Verify: independent\n")
+        with mock.patch.object(self.plug, "_crew_role", return_value="verifier"):
+            res = self.plug._review_guard("kanban_request_review", {"summary": "verified"})
+        self.assertEqual("block", res["action"])
+        self.assertIn("kanban_request_changes", res["message"])
+
     def test_a_repin_that_raises_never_stops_the_review(self):
         self.card("Verify: independent\n")
         with mock.patch.object(crew_card, "repin_for_review", side_effect=RuntimeError("router down")):
@@ -127,9 +134,22 @@ class RepinTests(unittest.TestCase):
     def test_a_review_pick_replaces_the_writers_pin_and_asks_for_the_review_class(self):
         answer = {"label": "gemini:m", "provider": "gemini", "model": "gemini-3-flash-preview", "why": "w",
                   "floor": {"min_context": 64000}, "menu_size": 2}
-        with mock.patch.object(crew_card, "route_answer", return_value=answer) as ask:
+        calls = []
+
+        def fake_kanban(args, timeout=120):          # `hermes kanban set-model <id> <model> --provider P`
+            calls.append(args)
+            conn = sqlite3.connect(self.db)
+            conn.execute("update tasks set model_override = ?, provider_override = ? where id = ?",
+                         (args[2], args[args.index("--provider") + 1], args[1]))
+            conn.commit()
+            conn.close()
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(crew_card, "route_answer", return_value=answer) as ask, \
+                mock.patch.object(crew_card, "_kanban", fake_kanban):
             got = crew_card.repin_for_review("t_r")
         self.assertEqual("pinned", got["action"])
+        self.assertEqual([["set-model", "t_r", "gemini-3-flash-preview", "--provider", "gemini"]], calls)
         self.assertEqual("review", ask.call_args.args[0])
         self.assertEqual(("gemini-3-flash-preview", "gemini"), self.pin("t_r"))
 

@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Proof that a card opened from a chat topic records that topic as its origin (leg 3 of the live walk).
+"""Proof that a card opened from a chat topic records that topic as its origin.
 
-This is the part of crew_live_walk.py that needs only the kanban kernel: the walk drives the real Zulip server, and
-the card it used to open on the live board now opens here, on the SCRATCH board and scratch HERMES_HOME of
-crew_coordinator_proof.py (the real `hermes kanban` verbs through its wrapper, no gateway, no model, the live
-board never opened).
+Runs on the SCRATCH board and scratch HERMES_HOME of crew_coordinator_proof.py (the real `hermes kanban` verbs
+through its wrapper, no gateway, no model, the live board never opened).
 
   1  `crew_card.py open` from a session whose chat is a stream topic writes one `origin` event carrying that
-     stream and that topic (the row the feed reads to send the report back to the same topic)
+     stream and that topic (the row crew_notify reads to send the report back to the same topic)
   2  `crew_card.py origin --card` reads the same record back
   3  the card's body carries the `Origin:` line for the same topic
-
-The two-stage proof (crew_two_stage_proof.py) already walks one `Verify: proof` card and one `independent` card to
-done on this board; the live walk no longer repeats that.
 
 Run:  python3 crew_origin_open_proof.py
 Exit: 0 when every check passes, 1 otherwise.

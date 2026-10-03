@@ -1,6 +1,6 @@
 // Shared by the board and the card page: inlined ahead of board.js / card.js.
 function esc(t){ return (t===null||t===undefined)?"":String(t)
-  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
 // A duration in seconds as 4s / 4m / 4h / 4d.
 function fmt(s){ if(s===null||s===undefined) return "";
   s=Math.max(0,Math.floor(s)); if(s<60) return s+"s";
@@ -31,3 +31,8 @@ function copyText(text, done){
     document.body.removeChild(ta); done(ok);
   }catch(e){ done(false); }
 }
+
+// A role's face: the dashboard server gives each role one of the shipped DiceBear "Blobs" variants (CC0, seed
+// tq58bv38) the first time it shows it, and keeps it (crew_graph_serve.role_face) - the page only names the role.
+function faceUrl(name){ var n = String(name || "").toLowerCase().replace(/^crew-/, "").replace(/[^a-z0-9_-]/g, "");
+  return "/avatars/role/" + (n || "unknown") + ".svg"; }

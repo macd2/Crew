@@ -13,3 +13,4 @@ node_modules/
 
 # runtime state the dashboard writes (cleared notifications)
 crew/attention_acks.json
+Test_output/

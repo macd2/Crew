@@ -38,6 +38,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_card  # noqa: E402 - the shared readers (decision_detail)
 import crew_result  # noqa: E402 - the one reader of a tool result row (ok|err, reason, output)
+import crew_watch  # noqa: E402 - done_report: the done summary the owner is sent, shown on the card page
 
 DEFAULT_STEPS = 6
 GAP = 3  # horizontal gap between boxes in a layer band
@@ -756,6 +757,21 @@ def pending_reason(db, card_id, runs):
     return "", "", None
 
 
+def load_done_report(db, card_id, status):
+    """The card's done report (crew_watch.done_report: the text crew sends the owner, minus header and link),
+    '' for a card that is not done."""
+    if status != "done":
+        return ""
+    conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        return crew_watch.done_report(conn, db, card_id, time.time())
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+
+
 def load_decisions(db, card_id):
     """The coordinator's decisions about this card (`crew_decision` events), oldest first."""
     out = []
@@ -782,9 +798,11 @@ def decision_label(rec):
         "owner_close": "the owner closed it",
     }
     if kind == "audit":  # the coordinator's re-run of the proof after completion: pass, or fail with a follow-up
-        failed = str(rec.get("outcome") or "") == "fail"
-        words["audit"] = ("coordinator audit failed it" + (" (follow-up %s)" % rec["followup"] if rec.get("followup") else "")
-                          if failed else "coordinator audited it: the proof still passes")
+        outcome = str(rec.get("outcome") or "")
+        follow = " (follow-up %s)" % rec["followup"] if rec.get("followup") else ""
+        words["audit"] = ("coordinator audit failed it" + follow if outcome == "fail" else
+                          "coordinator audit: the proof was blocked by Hermes safety, owner asked" + follow
+                          if outcome == "blocked" else "coordinator audited it: the proof still passes")
     label = words.get(kind, "coordinator decided: %s" % kind)
     detail = crew_card.decision_detail(rec, 70)
     return "%s: %s" % (label, detail) if detail else label
@@ -886,17 +904,8 @@ def load_progress_units(card_id):
 
 
 def load_first_pass(card_id):
-    """Did the card pass verification on the first try? The number the research says to watch."""
-    lines = crew_card.verdict_lines(card_id)
-    if not lines:
-        return {}
-    fails = 0
-    for rec in lines:
-        if rec["verdict"] == "PASS":
-            return {"passes": sum(1 for v in lines if v["verdict"] == "PASS"),
-                    "fails": fails, "first_pass": fails == 0, "rounds": len(lines)}
-        fails += 1
-    return {"passes": 0, "fails": fails, "first_pass": False, "rounds": len(lines)}
+    """Did an independent check (verifier or coordinator) pass the card on its first run? crew_card.first_pass."""
+    return crew_card.first_pass(card_id)
 
 
 def card_box_fields(card_ev):
@@ -1695,6 +1704,7 @@ def build_graph(card_ref, steps_n=DEFAULT_STEPS):
         **card_box_fields(root_ev),
         "tokens": load_ledger_totals(card_id),
         "situation": build_situation(b.db, card_id, card_row, root_ev, b.runs),
+        "report": load_done_report(b.db, card_id, card_row[2] if len(card_row) > 2 else ""),
         "root": root,
         "node_count": len(nodes),
         "edge_count": len(edges),
@@ -2004,7 +2014,7 @@ def render_terminal(graph, colour, steps_n):
         fp = sit.get("first_pass") or {}
         if fp.get("rounds"):
             out.append("verification: %s (%d fail(s) before first pass, %d rounds)" % (
-                "passed first try" if fp.get("first_pass") else "needed rework",
+                "passed first try" if fp.get("first_pass") else ("needed rework" if fp.get("passes") else "check failed"),
                 fp.get("fails", 0), fp["rounds"]))
     roster = []
     for r in graph.get("roles") or []:
@@ -2086,7 +2096,9 @@ def _brief_fields(graph):
             "brief_hidden": ""}
 
 
-def render_html(graph, json_filename):
+def render_html(graph, json_filename, nonce=None):
+    # nonce: the serving process's per-response CSP nonce, set on every inline <script>; a standalone
+    # --html file has no CSP and passes none.
     initial = _js_safe(graph)
     card_id = graph.get("card_id") or ""
     title = _html.escape("crew graph - " + card_id)
@@ -2113,10 +2125,10 @@ def render_html(graph, json_filename):
       <div id="sitfields" class="fields"></div>
     </div>
     <div class="tcell" id="topWhy">
-      <div class="tch">pending reason</div>
+      <div class="tch" id="whyHead">pending reason</div>
       <div class="tce" id="sitboxNone">nothing pending</div>
       <div id="sitbox" hidden>
-        <div id="sitboxHead"><span class="sbl"></span><span class="sb"></span><button id="sitCopy" class="copy" type="button" title="copy the pending reason" onclick="sitCopyClick(event)">copy</button></div>
+        <div id="sitboxHead"><span class="sbl"></span><span class="sb"></span><button id="sitCopy" class="copy" type="button" title="copy the pending reason">copy</button></div>
         <div id="sitboxWhy"></div>
         <div id="sitboxMeta"></div>
       </div>
@@ -2125,7 +2137,7 @@ def render_html(graph, json_filename):
       <div class="tch">repeated stops</div>
       <div class="tce" id="spinboxNone">not spinning</div>
       <div id="spinbox" hidden>
-        <div id="spinboxHead"><span id="spinboxCount"></span><span class="sbl">spinning</span><button id="spinCopy" class="copy" type="button" title="copy the repeated reason" onclick="spinCopyClick(event)">copy</button></div>
+        <div id="spinboxHead"><span id="spinboxCount"></span><span class="sbl">spinning</span><button id="spinCopy" class="copy" type="button" title="copy the repeated reason">copy</button></div>
         <div id="spinboxText"></div>
       </div>
     </div>
@@ -2169,7 +2181,7 @@ def render_html(graph, json_filename):
   <span class="meta">
     <span id="counts"></span>
     <a href="/">overview</a>
-    <span class="hints">space pause - r refresh - f fit - 0 zoom - F follow - ? help - o overview</span>
+    <span class="hints">space pause - r refresh - f or double-click fit - 0 zoom - F follow - ? help - o overview</span>
   </span>
 </div>
 <div id="help">
@@ -2184,12 +2196,13 @@ def render_html(graph, json_filename):
   <div class="row"><kbd>o</kbd>open overview</div>
   <div class="row"><kbd>esc</kbd>close help, clear role focus</div>
 </div>
-<script>
+<script{nonce_attr}>
 {js}
 </script>
 </body>
 </html>
-""".format(title=title, favicon=favicon_link(), css=css, js=js, **_tok_fields(graph.get("tokens")),
+""".format(title=title, favicon=favicon_link(), css=css, js=js,
+               nonce_attr=(' nonce="%s"' % _html.escape(nonce, quote=True)) if nonce else "", **_tok_fields(graph.get("tokens")),
                **_brief_fields(graph))
 
     html_doc = html_doc.replace("%(card_id)s", _html.escape(card_id, quote=True))
@@ -2258,7 +2271,12 @@ def main(argv=None):
         return 0
 
     if args.html is not None:
-        html_path = args.html or _default_path(args.outdir or os.getcwd(), graph["card_id"], ".graph.html")
+        if args.html and (args.html != os.path.basename(args.html) or args.html in (".", "..")):
+            print("--html takes a file name only; the directory is --outdir")
+            return 2
+        outdir = args.outdir or os.getcwd()
+        html_path = (os.path.join(outdir, args.html) if args.html
+                     else _default_path(outdir, graph["card_id"], ".graph.html"))
         html_path = os.path.abspath(html_path)
         json_path = os.path.splitext(html_path)[0] + ".json"
         json_name = os.path.basename(json_path)

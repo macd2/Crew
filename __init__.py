@@ -10,12 +10,15 @@ The owner's surface is five entries:
                           card waits on the owner, its one question.
   /crew-graph <card>      one card's flow graph: terminal box graph, two frames apart (--watch), or an
                           HTML file (--html).
-  /crew-stop [<card>]     stop one card, or every card, and keep it down.
+  /crew-stop [<card>]     park one card, or every open crew card: worker killed, card held, history kept
+                          (--archive drops one card for good).
+  /crew-unstuck <card>    the owner's fallback when the coordinator gave up: a triage card leaves triage
+                          unchanged, a blocked card (or one /crew-stop parked) is unblocked.
   /crew-diagnose [state]  a skill like the intake, so it runs in the invoking session's own turn: every
                           card in one board state with its id and reason, then how each would resume.
                           Read-only - it diagnoses, it never retries, unblocks or dispatches.
 
-The plugin commands (/crew-status, /crew-graph, /crew-stop) are deterministic and make no model call, and
+The plugin commands (/crew-status, /crew-graph, /crew-stop, /crew-unstuck) are deterministic and make no model call, and
 each option is its own command, so the command list in /help and in every platform menu IS the option
 list. Install and role checks are not commands: `python3 <crew repo>/install.py --check [--profile P]`
 (`hermes plugins doctor` only validates that a plugin loads and registers; it prints nothing about roles,
@@ -48,7 +51,7 @@ import time
 HOME = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 HERE = os.path.dirname(os.path.abspath(__file__))
 USAGE = ("Usage: /crew <what you want>  (intake, asks its questions) | /crew-status"
-         " | /crew-graph <card id|latest> [--watch N | --html [PATH]] | /crew-stop [<card id>] [--dry-run]"
+         " | /crew-graph <card id|latest> [--watch N | --html [PATH]] | /crew-stop [<card id>] [--archive] [--dry-run] | /crew-unstuck <card id>"
          " | /crew-diagnose [state]  (read-only)")
 
 # One slash command per option: the option lives in the command name, so /crew-status takes no
@@ -60,10 +63,15 @@ USAGE = ("Usage: /crew <what you want>  (intake, asks its questions) | /crew-sta
 # table right behind it (install.py CREW_MENU_ORDER is the same list, skills included).
 COMMANDS = [
     ("crew-status", "status", "", "Crew cards in flight: the coordinator's last decision and any question for you"),
-    ("crew-graph", "graph", "<card id|latest> [--watch N | --html [PATH]]",
+    ("crew-graph", "graph", "<card id|latest> [--watch N | --html [NAME]]",
      "One card's flow graph: terminal box graph, two frames apart (--watch), or an HTML file (--html)"),
-    ("crew-stop", "stop", "[<card id>] [--dry-run]",
-     "Stop one card, or every card, and keep it down: kill its worker, close its session, archive it"),
+    ("crew-stop", "stop", "[<card id>] [--archive] [--dry-run]",
+     "Park one card, or every open crew card: kill its worker, close its session, hold the card (/crew-unstuck "
+     "continues it; --archive drops one for good)"),
+    ("crew-unstuck", "unstuck", "<card id>",
+     "Put a stuck or parked card back in the queue: out of triage with no change, or unblock it"),
+    ("crew-safety", "safety", "[brave|safe]",
+     "How careful unattended proof commands are: no argument shows the mode, brave stops asking, safe restores it"),
 ]
 
 
@@ -98,18 +106,12 @@ def _card_body(task_id):
 
 
 WRITER_ROLES = ("worker", "content")
+CREW_ROLES = ("coordinator", "worker", "content", "verifier")
 
 
 def _card_tool():
-    """Load scripts/crew_card.py (shipped inside the plugin dir) as a module."""
-    for path in (os.path.join(HERE, "scripts", "crew_card.py"),
-                 os.path.join(HOME, "scripts", "crew_card.py")):
-        if os.path.exists(path):
-            spec = importlib.util.spec_from_file_location("crew_card_tool", path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
-    return None
+    """Load scripts/crew_card.py (the plugin's own copy, see _script_path) as a module."""
+    return _load_script("crew_card.py", "crew_card_tool")
 
 
 _RESULT_TOOL = None
@@ -120,15 +122,18 @@ def _result_tool():
     stop calls it after every tool call, so it must not re-read the file each time."""
     global _RESULT_TOOL
     if _RESULT_TOOL is None:
-        for path in (os.path.join(HERE, "scripts", "crew_result.py"),
-                     os.path.join(HOME, "scripts", "crew_result.py")):
-            if os.path.exists(path):
-                spec = importlib.util.spec_from_file_location("crew_result_tool", path)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                _RESULT_TOOL = mod
-                break
+        _RESULT_TOOL = _load_script("crew_result.py", "crew_result_tool")
     return _RESULT_TOOL
+
+
+def _load_script(name, module_name):
+    path = _script_path(name)
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ---------------------------------------------------------------- the option commands
@@ -190,9 +195,80 @@ def _cmd_maintenance(action, rest):
     return out if r.returncode == 0 else "%s (exit %d):\n%s" % (action, r.returncode, out)
 
 
+# Hermes approvals.mode that "brave" sets (hermes_cli config: manual | smart | off). "safe" puts back what each
+# profile had before brave (kept in <base home>/crew/safety-approvals.json), "manual" when nothing was kept.
+BRAVE_APPROVALS, SAFE_FALLBACK = "off", "manual"
+
+
+def _cmd_safety(rest=""):
+    """/crew-safety [brave|safe]: show, or set for good, how careful unattended proofs are.
+
+    The mode lives where Hermes keeps it - approvals.mode in each crew role profile - so one switch covers
+    the proofs (crew_safety.permanent_mode reads the coordinator's) and the workers' own terminal tool."""
+    tool = _card_tool()
+    if tool is None:
+        return "crew_card.py not found - run install.py --check"
+    want = (rest or "").strip().lower()
+    if not want:
+        mode = tool.crew_safety.permanent_mode()
+        return ("crew proof safety: %s. %s Change it with /crew-safety brave or /crew-safety safe." % (mode, (
+            "Nothing stops a proof except Hermes's hardline list and your approvals.deny rules."
+            if mode == "brave" else "A proof Hermes flags as dangerous stops the card and asks you.")))
+    if want not in ("brave", "safe"):
+        return "usage: /crew-safety [brave|safe]"
+    names = [r.get("name") for r in tool.roles_defaults().get("roles", []) if r.get("name")] or list(CREW_ROLES)
+    state_path = os.path.join(tool.base_home(), "crew", "safety-approvals.json")
+    try:
+        with open(state_path) as fh:
+            kept = json.load(fh)
+    except (OSError, ValueError):
+        kept = {}
+
+    def hermes(profile, *args):
+        return subprocess.run([_hermes_bin(), "-p", profile, "config"] + list(args), capture_output=True, text=True,
+                              timeout=60)
+
+    shown, failed = [], []
+    for name in names:
+        profile = tool.profile_prefix() + name
+        if not tool.profile_exists(profile):
+            continue
+        try:
+            got = hermes(profile, "get", "approvals.mode")
+            cur = (got.stdout or "").strip().splitlines()[-1].strip() if got.returncode == 0 and (got.stdout or "").strip() else ""
+            if want == "brave":
+                target = BRAVE_APPROVALS
+                if cur and cur != BRAVE_APPROVALS:
+                    kept[profile] = cur            # what safe puts back
+            elif cur.lower() in ("off", "false"):
+                target = kept.pop(profile, None) or SAFE_FALLBACK
+            else:
+                target = cur or SAFE_FALLBACK      # already careful: leave the owner's value alone
+            if target != cur:
+                if hermes(profile, "set", "approvals.mode", target).returncode != 0:
+                    raise OSError("config set failed")
+            shown.append("%s: %s -> %s" % (profile, cur or "unset", target))
+        except Exception:  # noqa: BLE001 - a missing hermes binary is a failed profile, not a broken chat turn
+            failed.append(profile)
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(state_path, "w") as fh:
+            json.dump(kept, fh, indent=1)
+    except OSError:
+        failed.append("(could not save %s)" % state_path)
+    text = "crew proof safety: %s (approvals.mode %s)." % (want, "; ".join(shown) or "no profile")
+    if failed:
+        text += " FAILED on %s." % ", ".join(failed)
+    if want == "brave":
+        text += (" Brave also lets the workers' own terminal commands run unprompted, not only the proofs; "
+                 "Hermes's hardline list and your approvals.deny rules still apply.")
+    return text
+
+
 def _option_handler(action):
     """One slash command per option: the name carries the option, the text after it is its args."""
-    run = {"status": _cmd_status, "graph": _cmd_graph, "stop": lambda rest: _cmd_maintenance("stop", rest)}[action]
+    run = {"status": _cmd_status, "graph": _cmd_graph, "unstuck": _cmd_unstuck,
+           "stop": lambda rest: _cmd_maintenance("stop", rest), "safety": _cmd_safety}[action]
 
     def handler(raw_args):
         return run((raw_args or "").strip())
@@ -211,15 +287,17 @@ def _config_get(key):
 
 
 def _script_path(name):
-    """A crew script in this profile's scripts dir (or the plugin's own copy)."""
-    for path in (os.path.join(HOME, "scripts", name), os.path.join(HERE, "scripts", name)):
-        if path and os.path.exists(path):
-            return path
+    """A crew script from the plugin's own tree: <plugin dir>/scripts first, then `crew.source_dir` (the package
+    checkout the installer ran from). Never $HERMES_HOME/scripts: that directory is the owner's, and code found
+    there is not code this plugin shipped."""
+    path = os.path.join(HERE, "scripts", name)
+    if os.path.exists(path):
+        return path
     src = _config_get("crew.source_dir")
     if src:
-        p = os.path.join(src, "scripts", name)
-        if os.path.exists(p):
-            return p
+        path = os.path.join(src, "scripts", name)
+        if os.path.exists(path):
+            return path
     return None
 
 
@@ -298,30 +376,32 @@ def crew_handoff_hook(user_message=None, session_id=None, **_kw):
     attempts) re-explores everything the previous run did.
     """
     card = os.environ.get("HERMES_KANBAN_TASK")
-    if not card or not _crew_role():
+    role = _crew_role()
+    if not card or not role:
         return None
     key = str(session_id or card)
     if key in _HANDOFF_GIVEN:
         return None
     _HANDOFF_GIVEN.add(key)
-    text = _handoff_text(card)
+    text = "\n\n".join(t for t in (_handoff_text(card), _lessons_block(role)) if t)
     if not text:
         return None
     return {"context": text}
 
 
+def _lessons_block(role=None):
+    """The lessons file (scripts/crew_lessons.py) as context: a role's own plus `all`, or just `all` for the intake."""
+    try:
+        mod = _load_script("crew_lessons.py", "crew_lessons_tool")
+        if mod is None:
+            return ""
+        return mod.block(role) if role else mod.intake_block()
+    except Exception:  # noqa: BLE001 - no lessons is the old behaviour, never a broken turn
+        return ""
+
+
 def _graph_script():
-    candidates = [
-        os.path.join(HOME, "scripts", "crew_graph.py"),
-        os.path.join(HERE, "scripts", "crew_graph.py"),
-    ]
-    src = _config_get("crew.source_dir")
-    if src:
-        candidates.append(os.path.join(src, "scripts", "crew_graph.py"))
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    return None
+    return _script_path("crew_graph.py")
 
 
 def _run_graph(args, timeout=120):
@@ -340,6 +420,20 @@ def _run_graph(args, timeout=120):
 
 def _fence(s):
     return "```\n%s\n```" % s
+
+
+def _cmd_unstuck(rest):
+    """The owner's fallback when the coordinator gave up on a card (crew_card.unstuck_card)."""
+    words = (rest or "").split()
+    if len(words) != 1:
+        return "Usage: /crew-unstuck <card id>"
+    tool = _card_tool()
+    if tool is None:
+        return "crew_card.py not found - run install.py --check"
+    try:
+        return tool.unstuck_card(words[0])[1]
+    except Exception as exc:  # noqa: BLE001 - a board call must never break the chat turn
+        return "crew-unstuck failed: %s" % exc
 
 
 def _cmd_graph(rest):
@@ -368,7 +462,11 @@ def _cmd_graph(rest):
         i += 1
 
     if html is not None:
-        outdir = os.path.dirname(os.path.abspath(html)) if html else os.path.join(HOME, "cache", "scratch")
+        # the file lands in the profile's own scratch dir and nowhere else: a bare file name only, so a
+        # chat command cannot make the plugin write to an arbitrary path
+        outdir = os.path.join(HOME, "cache", "scratch")
+        if html and (html != os.path.basename(html) or html in (".", "..")):
+            return "--html takes a file name only (it is written under %s)" % outdir
         os.makedirs(outdir, exist_ok=True)
         _code, out = _run_graph(["--card", card, "--html", html, "--outdir", outdir])
         return out
@@ -420,6 +518,36 @@ VERIFIER_WRITE_RX = re.compile(
     r"--data|-d\s|-F\s|--upload-file|-T\s)|\bwget\b[^|;]*--post|\b(ssh|scp|rsync|sendmail|mail|mutt)\b|"
     r"\bhermes\b[^|;]*\b(send|config\s+set|kanban\s+(create|complete|edit|assign|archive|link))\b|"
     r"\bsystemctl\b|\bkill\b|\bpip\b|\bnpm\b|\bapt\b|\bsudo\b")
+
+
+# Proof scripts live in a `.crew/` folder and belong to the verifier: a writer never creates or changes one, and the
+# verifier's file tools reach nothing else.
+CREW_DIR_RX = re.compile(r"(?:^|[\s'\"=/])\.crew(?:/|$)")
+PATCH_FILE_RX = re.compile(r"^\*\*\* (?:Update|Add|Delete|Move to)[^:\n]*:\s*(.+)$", re.M)
+FILE_WRITE_TOOLS = ("write_file", "patch")
+
+
+def _file_tool_paths(args):
+    return [p for p in [str(args.get("path") or "")] + PATCH_FILE_RX.findall(str(args.get("patch") or "")) if p.strip()]
+
+
+def _only_crew_dir(args):
+    """A file tool call whose every target is under `.crew/`: the one write the verifier has."""
+    paths = _file_tool_paths(args if isinstance(args, dict) else {})
+    return bool(paths) and all(CREW_DIR_RX.search(p) for p in paths)
+
+
+def _writes_crew_dir(tool_name, args):
+    """True when this call writes under a `.crew/` folder: write_file / patch on such a path (a V4A patch names its
+    files in `*** Update File:` lines) or a terminal command that both writes (VERIFIER_WRITE_RX) and names `.crew/`.
+    Reading a proof script is not a write."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name in FILE_WRITE_TOOLS:
+        return any(CREW_DIR_RX.search(p) for p in _file_tool_paths(args))
+    if tool_name == "terminal":
+        cmd = str(args.get("command") or "")
+        return bool(CREW_DIR_RX.search(cmd) and VERIFIER_WRITE_RX.search(cmd))
+    return False
 
 
 def _crew_role():
@@ -660,13 +788,15 @@ def _note_overrun(card, used, budget, tool_name):
 # reply to a `clarify` form, or a plain answer - which is not a /crew turn, and retyping the command
 # to make the card openable is the friction this window removes.
 #
-# The window closes on the first card opened in it, and expires after INTAKE_WINDOW_SECONDS. A
+# The window closes on the first card opened in it, and expires INTAKE_WINDOW_SECONDS after the owner's last
+# turn in it (a /crew turn or, while the window is live, any later owner message: crew_intake_preload extends it,
+# so an intake that stays in conversation - the owner chose to discuss first - is not cut off at 30 minutes). A
 # session that never saw /crew has no window, so the gate itself is unchanged. Everything lives in
 # this process's memory - no session database read on any tool call.
 
 _CREW_TURNS = {}          # (session_id, turn_id) -> time recorded
 _CREW_TURNS_MAX = 512
-# How long a /crew turn leaves its session able to open the card. The clarify form's own wait is
+# How long a /crew turn (or the owner's latest message in its live window) leaves its session able to open the card. The clarify form's own wait is
 # 600s (config clarify_timeout); 1800 leaves room for a slow answer without holding the door open
 # for an ordinary session half an hour later.
 INTAKE_WINDOW_SECONDS = 1800
@@ -676,6 +806,45 @@ _CREW_WINDOWS = {}        # session_id -> expiry epoch
 CREW_SKILL_INVOKED_RX = re.compile(r"\[IMPORTANT: The user has invoked the \"crew\" skill\b")
 CARD_OPEN_RX = re.compile(r"crew_card\.py[\"']?\s+open(?=\s|$|[;&|])")
 PROBE_TITLE_RX = re.compile(r"--title(?:\s+|=)[\"']?PROBE\b")
+
+
+# Answering crew's report. The in-session watcher (scripts/crew_watch.py, started by the intake as a
+# background process with notify_on_complete) ends by delivering its output into the owner's session as a
+# new turn wrapped by Hermes: `[IMPORTANT: Background process <id> completed ...` / `Command: ...crew_card.py
+# watch --card <id>`. That turn - seen by the plugin, never written by a model - opens a REPORT window for
+# that session and card. The owner's next message there ("do it again") runs the intake for a follow-up card
+# without retyping /crew: the window is consumed by that message, which opens the session's intake window
+# and gets the crew skill injected once. Other sessions and non-watcher completions open nothing.
+REPORT_WINDOW_SECONDS = 1800
+_REPORT_WINDOWS = {}      # session_id -> (card_id, expiry epoch); consumed by the owner's next message
+WATCH_REPORT_RX = re.compile(
+    r"\A\s*\[IMPORTANT: Background process \S+ completed\b[^\n]*\n\s*Command:[^\n]*"
+    r"crew_card\.py[\"']?\s+watch\s+--card\s+(\S+)")
+
+
+def _note_report(session_id, card_id):
+    sid = str(session_id or "")
+    if not sid:
+        return
+    _REPORT_WINDOWS[sid] = (card_id, time.time() + REPORT_WINDOW_SECONDS)
+    if len(_REPORT_WINDOWS) > _CREW_TURNS_MAX:
+        _REPORT_WINDOWS.pop(next(iter(_REPORT_WINDOWS)), None)
+
+
+def _take_report(session_id):
+    """The card id of this session's live report window, consumed (None when absent or expired)."""
+    entry = _REPORT_WINDOWS.pop(str(session_id or ""), None)
+    if entry and time.time() <= entry[1]:
+        return entry[0]
+    return None
+
+
+def _crew_skill_text():
+    try:
+        with open(os.path.join(HERE, "skills", "crew", "SKILL.md"), encoding="utf-8") as fh:
+            return _strip_frontmatter(fh.read())
+    except OSError:
+        return None
 
 
 def _turn_key(session_id, turn_id):
@@ -738,6 +907,20 @@ def _open_guard(tool_name, args, session_id, turn_id):
                        "open crew intake, so crew_card.py open is refused. Answer the owner "
                        "normally; if they want crew work they type /crew <ask> and the intake "
                        "runs in that turn."}
+
+
+PROOF_ANSWER_RX = re.compile(r"crew_card\.py[\"']?\s+proof-answer\b")
+
+
+def _answer_guard(tool_name, args):
+    """Refuse `crew_card.py proof-answer` inside a card's run (worker, verifier, the coordinator's turn): it
+    confirms a proof command or lets a flagged one run, which is the owner's call, never the proposing model's.
+    The script refuses on the same environment; this catches the call before a shell can unset it."""
+    if tool_name != "terminal" or not PROOF_ANSWER_RX.search(str((args or {}).get("command") or "")):
+        return None
+    if not (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("CREW_COORDINATOR_TURN")):
+        return None
+    return {"action": "block", "message": "a proof question is answered by the owner, not from inside a card's run."}
 
 
 def _session_get(name):
@@ -831,8 +1014,8 @@ def _drop_kernel_subscription(card_id):
 
     The kernel notifier wakes the chat on every blocked / review_requested / changes_requested /
     gave_up event (gateway/kanban_watchers_notifier.py TERMINAL_KINDS), which would put the owner back
-    in every retry the coordinator is handling. The crew's own feed reports the ending once and raises an
-    owner question only through an ask_owner decision, so a crew card has exactly one return path."""
+    in every retry the coordinator is handling. crew_notify (run by the coordinator pass) reports the ending once
+    and raises an owner question only through an ask_owner decision, so a crew card has exactly one return path."""
     try:
         from hermes_cli import kanban_db_connect as kbc
         from hermes_cli import kanban_db_notify as kbn
@@ -909,7 +1092,8 @@ def _close_guard(tool_name, args):
 def _review_guard(tool_name, args):
     """`kanban_request_review` on a crew card follows the card's `Verify:` line. `proof`: the writer proves it and
     closes it (the coordinator audits afterwards), so no verifier session is opened - the call is refused with the
-    two steps that do finish it. `independent`: the review goes ahead, after the card's model pin is swapped for
+    two steps that do finish it. `closeout` (a part of a split): refused, it is completed directly.
+    `independent`: the review goes ahead, after the card's model pin is swapped for
     the router's `review` pick (the writer's pin would otherwise carry over to the verifier's run). A card with no
     `Verify:` line keeps the old flow."""
     if tool_name != "kanban_request_review":
@@ -922,9 +1106,19 @@ def _review_guard(tool_name, args):
     if mode == "proof":
         return {"action": "block",
                 "message": "card %s is `Verify: proof`: no verifier session runs on it. Run `python3 \"$HERMES_HOME/"
-                           "scripts/crew_card.py\" verdict --card %s`, then kanban_complete with its raw output "
+                           "plugins/crew/scripts/crew_card.py\" verdict --card %s`, then kanban_complete with its raw output "
                            "(the coordinator audits the proof afterwards)." % (card, card)}
+    if mode == "closeout":
+        return {"action": "block",
+                "message": "card %s is `Verify: closeout`: it is one part of a split and has no proof of its own. "
+                           "kanban_complete it with the artifact paths; the close-out card runs the split card's "
+                           "proof once every part is done." % card}
     if mode == "independent":
+        if _crew_role() == "verifier":
+            return {"action": "block",
+                    "message": "card %s: the verifier never requests review: it would become the card's "
+                               "implementer and every request-changes would come back to the verifier, not the "
+                               "writer. PASS: kanban_complete; FAIL: kanban_request_changes naming the exact fix." % card}
         try:
             tool.repin_for_review(card)
         except Exception:  # noqa: BLE001 - a pin that could not be swapped must not stop the review
@@ -932,10 +1126,39 @@ def _review_guard(tool_name, args):
     return None
 
 
+def _crew_skill_names():
+    """The skills this plugin ships: the directories under its skills/ (install.py's skill_names, the same list)."""
+    try:
+        d = os.path.join(HERE, "skills")
+        return {n for n in os.listdir(d) if os.path.isfile(os.path.join(d, n, "SKILL.md"))}
+    except OSError:
+        return set()
+
+
+def _skill_edit_guard(tool_name, args):
+    """pre_tool_call, every profile: `skill_manage` on one of crew's own skills is refused. The installed copy is
+    overwritten on the next install and fails crew_parity_check; a lesson belongs in the lessons file. skill_manage
+    names its target per op (`operations[].name`, `category/name` allowed) or, in the legacy flat shape, in `name`."""
+    if tool_name != "skill_manage" or not isinstance(args, dict):
+        return None
+    ops = args.get("operations")
+    named = [args.get("name")] + [o.get("name") for o in ops if isinstance(o, dict)] if isinstance(ops, list) \
+        else [args.get("name")]
+    mine = _crew_skill_names()
+    hit = sorted({str(n).strip().split("/")[-1] for n in named if n} & mine)
+    if not hit:
+        return None
+    return {"action": "block",
+            "message": "crew's skills are shipped by the plugin and overwritten on update (%s); record the lesson with: "
+                       "python3 \"$HERMES_HOME/plugins/crew/scripts/crew_card.py\" lesson --role <role> --text \"...\""
+                       % ", ".join(hit)}
+
+
 def crew_tool_guard(tool_name=None, args=None, **kwargs):
     """pre_tool_call policy: the /crew open gate everywhere (coordinator included), and in role
     profiles the per-card budget hard stop and the read-only verifier."""
-    blocked = _open_guard(tool_name, args, kwargs.get("session_id"), kwargs.get("turn_id"))
+    blocked = _open_guard(tool_name, args, kwargs.get("session_id"), kwargs.get("turn_id")) \
+        or _answer_guard(tool_name, args) or _skill_edit_guard(tool_name, args)
     if blocked:
         return blocked
     if tool_name == "kanban_create":
@@ -958,6 +1181,10 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
     if blocked:
         return blocked
     role = _crew_role()
+    if role in WRITER_ROLES and _writes_crew_dir(tool_name, args):
+        return {"action": "block",
+                "message": "proof files belong to the verifier: %s writes under .crew/ are refused. Fix the work, never "
+                           "the proof (reading .crew/ is fine)." % role}
     if role == "coordinator" and os.environ.get("CREW_COORDINATOR_TURN"):
         if tool_name in COORDINATOR_TURN_BLOCKED:
             return {"action": "block",
@@ -996,16 +1223,17 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
                     "crew budget exhausted for card %s (%d of %d tokens). Hard stop." % (card, used, budget),
                     "needs_input", "Needs you: budget exhausted")}
     if role == "verifier":
-        if tool_name in VERIFIER_BLOCKED_TOOLS:
+        if tool_name in VERIFIER_BLOCKED_TOOLS and not (tool_name in FILE_WRITE_TOOLS and _only_crew_dir(args)):
             return {"action": "block",
-                    "message": "verifier has no write/send tools (%s). Judge the artifact; never fix it." % tool_name}
+                    "message": "verifier has no write/send tools (%s) outside .crew/. Judge the artifact; never fix it; "
+                               "the proof script is the one file you write, under .crew/." % tool_name}
         if tool_name == "terminal":
             cmd = str((args or {}).get("command") or "")
             if VERIFIER_WRITE_RX.search(cmd):
                 return {"action": "block",
                         "message": "verifier terminal is read/run only; this command writes, moves, deletes, "
                                    "commits or sends. Run the card's proof with "
-                                   "`python3 \"$HERMES_HOME/scripts/crew_card.py\" verdict --card %s`." % card}
+                                   "`python3 \"$HERMES_HOME/plugins/crew/scripts/crew_card.py\" verdict --card %s`." % card}
     return None
 
 
@@ -1044,6 +1272,25 @@ def _record_brief(session_id, ask):
             _CREW_BRIEFS.pop(next(iter(_CREW_BRIEFS)), None)
 
 
+def _intake_facts():
+    """The facts the intake would otherwise dig for (2026-10-03: a /crew turn spent ~8 tool calls grepping
+    crew_card.py for the budget and running `crew_card.py safety`): each writer role's default budget and the
+    proof safety mode. Only what is true wherever the work lands - the target folder is the owner's answer."""
+    tool = _card_tool()
+    if tool is None:
+        return ""
+    try:
+        budgets = ", ".join("%s %d" % (r, tool.default_budget(r)) for r in ("worker", "content"))
+        mode = tool.crew_safety.permanent_mode()
+    except Exception:  # noqa: BLE001 - no facts is the old behaviour, never a broken /crew turn
+        return ""
+    facts = ("<crew-facts>\nBudget defaults (tokens): %s. Write the role's number on the Budget line; the plugin "
+             "raises it to the floor itself.\nProof safety mode: %s. Do not run `crew_card.py safety` or read "
+             "crew's files for these values.\n</crew-facts>" % (budgets, mode))
+    lessons = _lessons_block()
+    return facts + "\n" + lessons if lessons else facts
+
+
 def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw):
     """Record a /crew turn, open its intake window, and preload the crew skill when `/crew <ask>`
     reaches the model unexpanded.
@@ -1056,22 +1303,42 @@ def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw)
     """
     if not isinstance(user_message, str):
         return None
+    report = WATCH_REPORT_RX.match(user_message)
+    if report:
+        _note_report(session_id, report.group(1))
+        return None
+    if _REPORT_WINDOWS.get(str(session_id or "")) and not CREW_SLASH_RX.match(user_message) \
+            and not CREW_SKILL_INVOKED_RX.match(user_message.lstrip()[:200]):
+        card = _take_report(session_id)
+        if card and not _window_live(session_id):
+            body = _crew_skill_text()
+            if body is not None:
+                _open_window(session_id)
+                return {"context": (
+                    "The owner is answering crew's report on card %s. If they ask for more work on it "
+                    "(rework, redo, change), run the crew intake for a follow-up card now - the `crew` skill "
+                    "is already loaded below; do not call skill_view. Make it a NEW card titled "
+                    "\"rework %s: ...\" and put the prior card id in its Inputs so the writer starts from the "
+                    "existing artifact. Otherwise just answer.\n\n<skill name=\"crew\">\n%s\n</skill>\n%s"
+                    % (card, card, body, _intake_facts()))}
+    if _window_live(session_id) and not CREW_SLASH_RX.match(user_message) \
+            and not CREW_SKILL_INVOKED_RX.match(user_message.lstrip()[:200]):
+        _open_window(session_id)    # the owner is still talking in a live intake: the window runs from their last turn
+        return None
     if CREW_SKILL_INVOKED_RX.match(user_message.lstrip()[:200]):
         _record_crew_turn(session_id, turn_id)
         _open_window(session_id)
         _record_brief(session_id, _expanded_ask(user_message))
-        return None
+        facts = _intake_facts()
+        return {"context": facts} if facts else None
     m = CREW_SLASH_RX.match(user_message)
     if not m:
         return None
     _record_crew_turn(session_id, turn_id)
     _open_window(session_id)
     _record_brief(session_id, (m.group(1) or "").strip())
-    path = os.path.join(HERE, "skills", "crew", "SKILL.md")
-    try:
-        with open(path, encoding="utf-8") as fh:
-            body = _strip_frontmatter(fh.read())
-    except OSError:
+    body = _crew_skill_text()
+    if body is None:
         return None
     ask = (m.group(1) or "").strip()
     return {"context": (
@@ -1079,7 +1346,7 @@ def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw)
         "skills_list for it. The owner's ask is: \"%s\". Apply Rule 1 first: if the ask names no "
         "target and no measurable end state, ask through the clarify tool - one batch, no research "
         "call.\n\n"
-        "<skill name=\"crew\">\n%s\n</skill>" % (ask, body)
+        "<skill name=\"crew\">\n%s\n</skill>\n%s" % (ask, body, _intake_facts())
     )}
 
 
@@ -1125,18 +1392,29 @@ _COORDINATOR_MOD = None
 
 
 def _coordinator_tool():
-    """scripts/crew_coordinator.py loaded once as a module (the lock check lives there)."""
+    """scripts/crew_coordinator.py loaded once as a module: the gateway needs only lock_live and has_work from it, and
+    runs every tick, so a subprocess per tick would bring back the cost of a process on an idle board.
+
+    The script imports its siblings by bare name (crew_card, crew_handoff, crew_heal) and puts its own directory on
+    sys.path to do it. Here it is loaded under a prefixed module name, and sys.path and sys.modules are restored
+    afterwards, so nothing it pulled in stays importable by bare name inside the gateway; the module keeps its own
+    references to what it imported. The decision pass itself always runs in its own process (crew_tick)."""
     global _COORDINATOR_MOD
     if _COORDINATOR_MOD is None:
         path = _script_path("crew_coordinator.py")
         if not path:
             return None
-        here = os.path.dirname(path)
-        if here not in sys.path:
-            sys.path.insert(0, here)
-        spec = importlib.util.spec_from_file_location("crew_coordinator_tool", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        saved_path, saved_modules = list(sys.path), set(sys.modules)
+        try:
+            spec = importlib.util.spec_from_file_location("crew_plugin_crew_coordinator", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path[:] = saved_path
+            scripts = os.path.dirname(path) + os.sep
+            for name in set(sys.modules) - saved_modules:
+                if str(getattr(sys.modules[name], "__file__", "") or "").startswith(scripts):
+                    sys.modules.pop(name, None)
         _COORDINATOR_MOD = mod
     return _COORDINATOR_MOD
 
@@ -1154,7 +1432,8 @@ def crew_tick(board=None, dry_run=False, outcome=None, **_kw):
         args = [sys.executable, tool.__file__, "--once"] + (["--board", board] if board else [])
         with open(log, "ab") as fh:
             subprocess.Popen(args, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                             start_new_session=True, cwd=os.path.dirname(tool.__file__))
+                             start_new_session=True, cwd=os.path.dirname(tool.__file__),
+                             env=tool.crew_safety.proof_env())      # the gateway's secrets stay behind
     except Exception:  # noqa: BLE001 - a hook on the dispatcher must never break the tick
         pass
     return None

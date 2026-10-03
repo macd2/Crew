@@ -18,6 +18,8 @@ import unittest
 from pathlib import Path
 
 os.environ["HERMES_BIN"] = "/bin/false"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermes_fake import FakeConfig  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("crew_install_slim", str(REPO / "install.py"))
@@ -134,10 +136,10 @@ class SlimSkillsTests(unittest.TestCase):
 
 class ShippedListsTests(unittest.TestCase):
     def test_every_file_the_installer_ships_exists_in_the_package(self):
-        # A script deleted from the package but left in SCRIPT_FILES makes step_scripts raise on the
+        # A script deleted from the package but left in SCRIPT_FILES makes step_plugin raise on the
         # copy and leaves the profile half installed (crew_repeat_escalation_proof.py did, after step 1).
+        # PLUGIN_FILES carries the scripts (plugins/crew/scripts/...), so one list covers both.
         missing = [rel for rel in CI.PLUGIN_FILES if not (REPO / rel).is_file()]
-        missing += ["scripts/" + rel for rel in CI.SCRIPT_FILES if not (REPO / "scripts" / rel).is_file()]
         missing += ["roles/" + rel for rel in CI.ROLE_FILES if not (REPO / "roles" / rel).is_file()]
         self.assertEqual([], missing)
 
@@ -172,20 +174,19 @@ class SettingsTests(unittest.TestCase):
                     self.assertIn(name, known, "%s lists %s, not a kernel toolset" % (role, name))
         self.assertGreaterEqual(seen, 4, "coordinator, worker, content and verifier each list their toolsets")
 
-    def test_the_toolset_list_round_trips_through_config_yaml(self):
-        tmp = tempfile.mkdtemp(prefix="crew-slim-unit-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        home = os.path.join(tmp, "h")
-        put(os.path.join(home, "config.yaml"),
-            "model:\n  default: x\nplatform_toolsets:\n  cli:\n  - browser\n  - kanban\n  - web\n"
-            "  slack: []\nagent:\n  max_turns: 150\n")
+    def test_the_toolset_list_round_trips_through_hermes_config(self):
+        cfg, saved = FakeConfig(), CI.h
+        CI.h = cfg
+        self.addCleanup(setattr, CI, "h", saved)
+        cfg.seed("p", platform_toolsets__cli="[browser,kanban,web]", platform_toolsets__slack="[]",
+                 agent__max_turns="150")
         conf = REPO / "templates" / "profiles" / "worker" / "settings.conf"
-        changed = CI._apply_settings(home, str(conf))
+        changed = CI._apply_settings("p", str(conf))
         self.assertIn("platform_toolsets.cli", changed)
-        self.assertEqual("[terminal,file,web,kanban]", CI._yaml_read_key(home, "platform_toolsets.cli"))
-        self.assertEqual("[]", CI._yaml_read_key(home, "platform_toolsets.slack"))
-        self.assertEqual([], CI._apply_settings(home, str(conf)), "applying twice must change nothing")
-        self.assertEqual([], CI.settings_problems(home, "worker", str(conf.parent)))
+        self.assertEqual("[terminal,file,web,kanban]", CI._cfg("p", "platform_toolsets.cli"))
+        self.assertEqual("[]", CI._cfg("p", "platform_toolsets.slack"))
+        self.assertEqual([], CI._apply_settings("p", str(conf)), "applying twice must change nothing")
+        self.assertEqual([], CI.settings_problems("p", "worker", str(conf.parent)))
 
 
 class PromptBudgetTests(unittest.TestCase):
@@ -267,10 +268,18 @@ class ProvisionFlowTests(unittest.TestCase):
         put(os.path.join(self.src_home, "config.yaml"),
             "model:\n  default: x\nplatform_toolsets:\n  cli:\n  - browser\n  - kanban\nagent:\n  max_turns: 150\n")
 
+        self.cfg = FakeConfig()
+
+        class Created(Fake):
+            returncode = 0
+
         def fake_h(profile, *args):
             self.calls.append(args)
             if args[:2] == ("profile", "create"):        # what --clone-from does: copy the whole tree
                 shutil.copytree(self.src_home, CI.resolve_profile_home(args[2]))
+                return Created()
+            if args[:1] == ("config",):
+                return self.cfg(profile, *args)
             return Fake()
         CI.h = fake_h
 
@@ -285,7 +294,7 @@ class ProvisionFlowTests(unittest.TestCase):
             for name in CI.skill_names():
                 self.assertTrue(os.path.isfile(os.path.join(skills, "crew", name, "SKILL.md")), (role, name))
         worker = CI.resolve_profile_home("crew-worker")
-        self.assertEqual("[terminal,file,web,kanban]", CI._yaml_read_key(worker, "platform_toolsets.cli"))
+        self.assertEqual("[terminal,file,web,kanban]", CI._cfg("crew-worker", "platform_toolsets.cli"))
         self.assertGreater(tree_bytes(os.path.join(self.src_home, "skills")), 4_000_000, "the source keeps its skills")
         status, detail = CI.step_profiles("chat", "crew-", False)
         self.assertEqual("OK", status, detail)
@@ -304,7 +313,7 @@ class ProvisionFlowTests(unittest.TestCase):
 
     def test_parity_passes_on_the_provisioned_tree_and_sees_a_stale_role_skill(self):
         import subprocess
-        for step in (CI.step_plugin, CI.step_skills, CI.step_scripts, CI.step_roles):
+        for step in (CI.step_plugin, CI.step_skills, CI.step_roles):
             step(self.src_home, True)
         CI.step_profiles("chat", "crew-", True)
         cmd = [sys.executable, str(REPO / "scripts" / "crew_parity_check.py"), "--package", str(REPO),
@@ -317,6 +326,30 @@ class ProvisionFlowTests(unittest.TestCase):
         bad = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         self.assertEqual(1, bad.returncode)
         self.assertIn("skills/crew-verifier/SKILL.md", bad.stdout)
+
+    def test_a_profile_crew_did_not_create_is_never_pruned(self):
+        # an existing crew-verifier with no crew/template-shipped.json: someone else's profile under crew's name
+        home = CI.resolve_profile_home("crew-verifier")
+        put(os.path.join(home, "skills", "mine", "SKILL.md"), "keep me")
+        put(os.path.join(home, "SOUL.md"), "own soul")
+        self.assertFalse(CI.crew_owned(home))
+        status, detail = CI.step_role_skills(home, os.path.join(str(REPO), "templates", "profiles", "verifier"),
+                                             self.src_home, True, CI.crew_owned(home))
+        self.assertEqual("SKIP", status, detail)
+        self.assertTrue(os.path.isfile(os.path.join(home, "skills", "mine", "SKILL.md")))
+        CI.step_profiles("chat", "crew-", True)
+        self.assertTrue(os.path.isfile(os.path.join(home, "skills", "mine", "SKILL.md")), "step_profiles keeps it too")
+
+    def test_every_removed_path_is_printed(self):
+        import contextlib
+        import io
+        CI.step_profiles("chat", "crew-", True)
+        fat = os.path.join(CI.resolve_profile_home("crew-worker"), "skills")
+        put(os.path.join(fat, "devops", "x", "SKILL.md"), "x")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            CI.step_profiles("chat", "crew-", True)
+        self.assertIn("removed %s" % os.path.join(fat, "devops"), buf.getvalue())
 
     def test_the_installing_profile_keeps_its_skills(self):
         before = tree_bytes(os.path.join(self.src_home, "skills"))

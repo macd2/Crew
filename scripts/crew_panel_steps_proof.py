@@ -298,7 +298,7 @@ def main():
 
     profile = tempfile.mkdtemp(prefix="crew-panel-proof-")
     proc = subprocess.Popen(
-        [CHROME, "--headless=new", "--disable-gpu", "--no-sandbox",
+        [CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox",
          "--remote-debugging-port=%d" % PORT, "--user-data-dir=" + profile,
          "--window-size=1600,1000", "%s/card/%s#node=%s" % (URL, card, node["id"])],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

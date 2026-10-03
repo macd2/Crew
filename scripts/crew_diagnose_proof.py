@@ -198,7 +198,7 @@ def main():
     check("the skill names the acting passes it must not run",
           all(word in src for word in ("/crew-stop", "crew_coordinator.py")))
     check("the skill names the reader it runs",
-          "$HERMES_HOME/scripts/crew_diagnose.py" in src)
+          "$HERMES_HOME/plugins/crew/scripts/crew_diagnose.py" in src)
     check("the skill names every state the reader takes",
           all(state in src for state in ("blocked", "triage", "todo", "ready", "running", "done",
                                          "archived")))

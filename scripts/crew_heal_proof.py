@@ -4,10 +4,10 @@
 Seeded on a scratch board of this proof's own (never the live one), through the real coordinator pass, with no
 `hermes` call (HERMES_BIN is /bin/false) and no model call (the decider is /bin/false):
 
-  1. a ready card the respawn guard holds because its workspace is unwritable -> the pass repoints it to a
-     writable scratch dir, clears the stale error, and the KERNEL'S OWN guard (asked in its own interpreter)
-     no longer holds it
-  2. the heal is recorded as a `self_heal` row on the card, and a second pass does not heal it twice
+  1. a ready card the respawn guard holds because its workspace is unwritable is NOT touched by the crew: the
+     kernel owns workspaces and has no call to repoint one, so no write, no `self_heal` row, and the kernel's
+     own guard (asked in its own interpreter) still holds it - the card goes on to a coordinator decision
+  2. a second pass changes nothing either
   3. a ready card held on a quota wall with no router pick available -> the wall is counted and the card
      is left un-pinned (the remedy says it could not fix it), so it goes on to a decision instead of being
      re-pinned on a guess
@@ -113,23 +113,17 @@ def main():
         check("the kernel guard holds the card before the heal", before == "blocker_auth", before)
 
         coordinator("--dry-run")
-        row = rows("select workspace_path, last_failure_error from tasks where id = ?", (WS,))[0]
-        check("a dry run changes nothing", row["workspace_path"] == BROKEN and row["last_failure_error"]
-              and not heal_events(WS, "held_workspace"), row["workspace_path"])
-
         rep = coordinator()
         by_card = {c["card"]: c for c in rep.get("cards", [])}
         row = rows("select workspace_path, last_failure_error from tasks where id = ?", (WS,))[0]
-        ws_ok = bool(row["workspace_path"]) and os.path.isdir(row["workspace_path"]) and \
-            os.access(row["workspace_path"], os.W_OK)
-        check("a held card gets a writable workspace", ws_ok, row["workspace_path"])
-        check("the stale error that held it is cleared", not row["last_failure_error"], repr(row["last_failure_error"]))
-        check("the heal is recorded on the card", bool(heal_events(WS, "held_workspace")),
-              str(heal_events(WS, "held_workspace"))[:70])
-        check("the report names the remedy", by_card.get(WS, {}).get("action") == "heal:held_workspace",
+        check("the crew leaves a card with an unwritable workspace as it is (no repoint, error kept)",
+              row["workspace_path"] == BROKEN and bool(row["last_failure_error"]), row["workspace_path"])
+        check("no heal is recorded and the report names none",
+              not heal_events(WS, "held_workspace") and not str(by_card.get(WS, {}).get("action") or "").startswith("heal:"),
               str(by_card.get(WS))[:80])
         after = guard(WS)
-        check("the kernel guard no longer holds the card", after != "blocker_auth", after or "(none)")
+        check("the kernel guard still holds the card (a decision, not a repair, moves it)", after == "blocker_auth",
+              after or "(none)")
 
         wall = heal_events(WALL, "dead_model")
         check("a card on a dead model is acted on once and is not re-pinned on a guess",
@@ -141,15 +135,15 @@ def main():
               [c.get("detail") for c in rep.get("cards", []) if "could not heal" in str(c.get("detail"))][:1])
 
         coordinator()
-        check("a healed card is not healed twice", len(heal_events(WS, "held_workspace")) == 1,
+        check("a second pass changes nothing", not heal_events(WS, "held_workspace") and len(wall) == 1,
               "%d heal event(s)" % len(heal_events(WS, "held_workspace")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILS:
         print("PROOF FAIL: %d check(s) failed: %s" % (len(FAILS), ", ".join(FAILS)))
         return 1
-    print("PROOF OK: the coordinator pass repairs a held workspace until the kernel's own guard lets go, never "
-          "re-pins a dead model on a guess, and leaves a second pass with nothing to do")
+    print("PROOF OK: the coordinator pass never rewrites a workspace behind the kernel's back, never re-pins a "
+          "dead model on a guess, and leaves a second pass with nothing to do")
     return 0
 
 

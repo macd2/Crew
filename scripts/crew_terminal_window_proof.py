@@ -35,9 +35,6 @@ import urllib.request
 
 HOME = os.path.expanduser("~")
 PROFILE = os.path.dirname(os.path.abspath(__file__))
-for cand in (os.path.join(os.path.expanduser("~/.hermes"), "scripts"), os.path.dirname(PROFILE)):
-    if os.path.basename(cand) == "scripts" and os.path.isdir(cand):
-        sys.path.insert(0, cand)
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -289,7 +286,7 @@ def main():
         check("the line area is capped at six lines high", "max-height:93px" in html)
         check("a running edge has a dashed flow line", "flowdash" in html)
         check("the page reuses the line window across redraws", "stepCache" in html and "dropStep" in html)
-        proc = subprocess.Popen([CHROME, "--headless=new", "--disable-gpu", "--no-sandbox",
+        proc = subprocess.Popen([CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox",
                                  "--remote-debugging-port=%d" % PORT, "--window-size=1400,900",
                                  "--user-data-dir=" + PROFILE_DIR, BASE + "/card/" + PROBE],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

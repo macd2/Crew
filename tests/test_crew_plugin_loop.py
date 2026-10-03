@@ -7,6 +7,7 @@ HERMES_HOME; nothing here starts a real process (Popen is replaced) or reads a b
 """
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -28,7 +29,8 @@ class TickTests(unittest.TestCase):
         self.started = []
         self.tool = types.SimpleNamespace(__file__=str(REPO / "scripts" / "crew_coordinator.py"),
                                           lock_live=lambda board: self.live,
-                                          has_work=lambda board: self.work)
+                                          has_work=lambda board: self.work,
+                                          crew_safety=types.SimpleNamespace(proof_env=lambda: {"SCRUBBED": "1"}))
         self.live = False
         self.work = True
         for p in (mock.patch.object(P, "_coordinator_tool", lambda: self.tool),
@@ -43,6 +45,7 @@ class TickTests(unittest.TestCase):
         self.assertEqual(["--once", "--board", "proofs"], args[2:])
         self.assertTrue(kw["start_new_session"])
         self.assertEqual(P.subprocess.DEVNULL, kw["stdin"])
+        self.assertEqual({"SCRUBBED": "1"}, kw["env"])                 # the pass never inherits the gateway's env
 
     def test_a_board_with_no_new_crew_event_starts_no_process(self):
         self.work = False
@@ -97,6 +100,13 @@ class DecisionTurnGuardTests(unittest.TestCase):
         self.assertIsNone(self.guard("terminal", {"command": "hermes kanban show t_1"}))
         self.assertIsNone(self.guard("terminal", {"command": "git log --oneline | head"}))
 
+    def test_the_intakes_watcher_command_is_not_blocked_in_the_intake_or_any_role(self):
+        cmd = 'python3 "$HERMES_HOME/plugins/crew/scripts/crew_card.py" watch --card t_d3c396cd'
+        for role, turn in (("", False), ("coordinator", False), ("coordinator", True), ("verifier", False)):
+            with self.subTest(role=role, turn=turn):
+                self.assertIsNone(self.guard("terminal", {"command": cmd, "background": True,
+                                                          "notify_on_complete": True}, turn=turn, role=role))
+
     def test_a_writing_command_is_refused(self):
         for cmd in ("echo x > /tmp/f", "hermes kanban complete t_1", "rm -rf x", "git commit -m x"):
             with self.subTest(cmd=cmd):
@@ -117,14 +127,92 @@ class CommandTableTests(unittest.TestCase):
                      "SUBCOMMANDS", "ROLES_PATH"):
             self.assertFalse(hasattr(P, name), name)
 
+    def test_unstuck_takes_exactly_one_card_id_and_answers_with_the_tools_text(self):
+        tool = mock.Mock()
+        tool.unstuck_card.return_value = (True, "t_1: triage -> ready")
+        with mock.patch.object(P, "_card_tool", return_value=tool):
+            handler = P._option_handler("unstuck")
+            self.assertEqual("Usage: /crew-unstuck <card id>", handler(""))
+            self.assertEqual("Usage: /crew-unstuck <card id>", handler("t_1 t_2"))
+            tool.unstuck_card.assert_not_called()
+            self.assertEqual("t_1: triage -> ready", handler(" t_1 "))
+        tool.unstuck_card.assert_called_once_with("t_1")
+
     def test_the_options_that_stay_are_the_documented_ones(self):
-        self.assertEqual(["status", "graph", "stop"], [a for _n, a, _h, _d in P.COMMANDS])
+        self.assertEqual(["status", "graph", "stop", "unstuck", "safety"], [a for _n, a, _h, _d in P.COMMANDS])
 
     def test_the_platform_menu_is_the_skills_around_the_plugin_commands(self):
         spec = importlib.util.spec_from_file_location("crew_install_menu", str(REPO / "install.py"))
         inst = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(inst)
         self.assertEqual(["crew"] + [n for n, _a, _h, _d in P.COMMANDS] + ["crew-diagnose"], inst.CREW_MENU_ORDER)
+
+
+class SafetyCommandTests(unittest.TestCase):
+    """/crew-safety: no argument shows the mode; brave and safe switch Hermes's approvals.mode on every crew profile
+    and safe puts back what each profile had before brave."""
+
+    def setUp(self):
+        from hermes_fake import FakeConfig
+        self.cfg = FakeConfig()
+        self.cfg.seed("crew-coordinator", approvals__mode="smart")
+        self.cfg.seed("crew-worker", approvals__mode="manual")
+        self.cfg.seed("crew-content", approvals__mode="manual")
+        self.home = tempfile.mkdtemp()
+        self.tool = mock.Mock()
+        self.tool.base_home.return_value = self.home
+        self.tool.roles_defaults.return_value = {"roles": [{"name": "coordinator"}, {"name": "worker"},
+                                                           {"name": "content"}]}
+        self.tool.profile_prefix.return_value = "crew-"
+        self.tool.profile_exists.side_effect = lambda n: n != "crew-content"
+        self.tool.crew_safety.permanent_mode.return_value = "safe"
+
+        def run(cmd, **kw):
+            return self.cfg(cmd[cmd.index("-p") + 1], *cmd[cmd.index("-p") + 2:])
+        for p in (mock.patch.object(P, "_card_tool", lambda: self.tool),
+                  mock.patch.object(P, "_hermes_bin", lambda: "hermes"),
+                  mock.patch.object(P.subprocess, "run", run)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def mode(self, profile):
+        return self.cfg.store[profile]["approvals.mode"]
+
+    def test_no_argument_shows_the_mode_and_changes_nothing(self):
+        self.assertIn("crew proof safety: safe", P._cmd_safety(""))
+        self.assertEqual([], self.calls)
+
+    def test_no_argument_shows_the_mode_and_changes_nothing(self):
+        self.assertIn("crew proof safety: safe", P._cmd_safety(""))
+        self.assertEqual([], [c for c in self.cfg.calls if c[1:3] == ("config", "set")])
+
+    def test_brave_sets_off_and_safe_restores_each_profiles_own_value(self):
+        text = P._cmd_safety("brave")
+        self.assertEqual(("off", "off"), (self.mode("crew-coordinator"), self.mode("crew-worker")))
+        self.assertIn("crew-coordinator: smart -> off", text)
+        self.assertIn("workers' own terminal commands run unprompted", text)
+        text = P._cmd_safety("safe")
+        self.assertEqual(("smart", "manual"), (self.mode("crew-coordinator"), self.mode("crew-worker")))
+        self.assertIn("crew-coordinator: off -> smart", text)
+
+    def test_brave_twice_keeps_the_original_and_safe_without_state_falls_back_to_manual(self):
+        P._cmd_safety("brave")
+        P._cmd_safety("brave")                                  # must not overwrite smart with off
+        P._cmd_safety("safe")
+        self.assertEqual("smart", self.mode("crew-coordinator"))
+        self.cfg.seed("crew-worker", approvals__mode="off")     # brave set by hand, nothing kept
+        P._cmd_safety("safe")
+        self.assertEqual("manual", self.mode("crew-worker"))
+
+    def test_safe_leaves_a_value_that_is_not_off_alone(self):
+        P._cmd_safety("safe")
+        self.assertEqual("smart", self.mode("crew-coordinator"))
+        self.assertEqual([], [c for c in self.cfg.calls if c[1:3] == ("config", "set")])
+
+    def test_a_bad_word_is_a_usage_line(self):
+        self.assertEqual("usage: /crew-safety [brave|safe]", P._cmd_safety("yolo"))
+
 
 
 if __name__ == "__main__":

@@ -21,8 +21,10 @@ _TMPDIR = tempfile.mkdtemp(prefix="crew-heal-test-")
 SAFE_DB = os.path.join(_TMPDIR, "not-the-live-board.db")
 os.environ["KANBAN_DB"] = SAFE_DB
 
+sys.path.insert(0, str(REPO / "tests"))
 import crew_card  # noqa: E402
 import crew_heal  # noqa: E402
+import kernel_board as K  # noqa: E402
 
 LIVE_BOARD = os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db")
 
@@ -74,20 +76,20 @@ class IsBlockerTests(unittest.TestCase):
 
 
 class ProofCmdTests(unittest.TestCase):
-    """proof_cmd(body): the command the stale-block remedy re-runs."""
+    """proof_cmd(body): the one reader of a card body's proof line (display; nothing executes it any more)."""
 
     def test_it_reads_the_proof_command_line(self):
-        self.assertEqual("pytest -q tests", crew_heal.proof_cmd("Role: worker\nproof command: pytest -q tests\n"))
+        self.assertEqual("pytest -q tests", crew_card.proof_cmd("Role: worker\nproof command: pytest -q tests\n"))
 
     def test_it_is_case_insensitive_and_tolerates_extra_spacing(self):
-        self.assertEqual("pytest -q", crew_heal.proof_cmd("Proof Command:    pytest -q\n"))
+        self.assertEqual("pytest -q", crew_card.proof_cmd("Proof Command:    pytest -q\n"))
 
     def test_a_bodiless_or_valueless_line_returns_an_empty_string(self):
-        self.assertEqual("", crew_heal.proof_cmd("Role: worker\nDone when: green\n"))
-        self.assertEqual("", crew_heal.proof_cmd("proof command:\n"))
-        self.assertEqual("", crew_heal.proof_cmd("proof command:   \n"))
-        self.assertEqual("", crew_heal.proof_cmd(""))
-        self.assertEqual("", crew_heal.proof_cmd(None))
+        self.assertEqual("", crew_card.proof_cmd("Role: worker\nDone when: green\n"))
+        self.assertEqual("", crew_card.proof_cmd("proof command:\n"))
+        self.assertEqual("", crew_card.proof_cmd("proof command:   \n"))
+        self.assertEqual("", crew_card.proof_cmd(""))
+        self.assertEqual("", crew_card.proof_cmd(None))
 
     def test_the_no_proof_placeholder_is_not_a_command(self):
         # render_body() writes "proof command: (none - ...)" for a card opened with no proof. That
@@ -96,18 +98,17 @@ class ProofCmdTests(unittest.TestCase):
         body = crew_card.render_body({"role": "worker", "budget": 1000000, "goal": "g",
                                       "done_when": "d", "proof_cmd": ""})
         self.assertIn("(none - the verifier asks for one before accepting)", body)
-        self.assertEqual("", crew_heal.proof_cmd(body))
         self.assertEqual("", crew_card.proof_cmd(body))
 
     def test_a_real_command_after_the_placeholder_line_is_still_read(self):
         # only the placeholder text is dropped, never a real command on another line
         body = "proof command: (none - the verifier asks for one before accepting)\nRole: worker\n"
-        self.assertEqual("", crew_heal.proof_cmd(body))
+        self.assertEqual("", crew_card.proof_cmd(body))
         self.assertEqual("sh -c 'exit 0'",
-                         crew_heal.proof_cmd("Role: worker\nproof command: sh -c 'exit 0'\n"))
+                         crew_card.proof_cmd("Role: worker\nproof command: sh -c 'exit 0'\n"))
 
     def test_it_reads_the_first_proof_line_only(self):
-        self.assertEqual("first", crew_heal.proof_cmd("proof command: first\nproof command: second\n"))
+        self.assertEqual("first", crew_card.proof_cmd("proof command: first\nproof command: second\n"))
 
 
 def heal_with_extra(card, dry, healed):
@@ -122,7 +123,7 @@ class SafelyBindingTests(unittest.TestCase):
     every card hit a TypeError, was never healed, and the pass reported "could not heal" forever.
     """
 
-    HELPERS = ("heal_held_workspace", "heal_dead_model", "heal_stale_verify")
+    HELPERS = ("heal_dead_model", "heal_stale_verify")
 
     def test_every_heal_helper_takes_exactly_card_and_dry(self):
         for name in self.HELPERS:
@@ -163,7 +164,6 @@ class HealCardRoutingTests(unittest.TestCase):
             return fn
 
         self.patches = [
-            mock.patch.object(crew_heal, "heal_held_workspace", remedy("held_workspace")),
             mock.patch.object(crew_heal, "heal_dead_model", remedy("dead_model", fixed=False)),
             mock.patch.object(crew_heal, "heal_stale_verify", remedy("stale_verify")),
             mock.patch.object(crew_heal, "heal_stamp", lambda card, cls: False),
@@ -181,24 +181,26 @@ class HealCardRoutingTests(unittest.TestCase):
         self.assertIsNone(crew_heal.heal_card(self.card(last_failure_error="the tests fail on line 3"), False))
         self.assertEqual([], self.seen)
 
-    def test_a_held_workspace_wins_before_the_dead_model(self):
-        got = crew_heal.heal_card(self.card(last_failure_error="permission denied: /x"), False)
-        self.assertEqual("held_workspace", got["class"])
-        self.assertTrue(got["fixed"])
-        self.assertEqual(["held_workspace"], self.seen)
+    def test_an_unwritable_workspace_is_not_healed_by_the_crew_any_more(self):
+        # the kernel owns the workspace; a permission error is a blocker the coordinator decides on
+        self.assertIsNone(crew_heal.heal_card(self.card(last_failure_error="permission denied: /x"), False))
+        self.assertEqual([], self.seen)
 
-    def test_a_wall_falls_through_to_the_dead_model_and_stays_unfixed_when_no_pick_fits(self):
-        with mock.patch.object(crew_heal, "heal_held_workspace", lambda card, dry: None):
-            got = crew_heal.heal_card(self.card(last_failure_error="429 rate limit"), False)
+    def test_a_wall_goes_to_the_dead_model_and_stays_unfixed_when_no_pick_fits(self):
+        got = crew_heal.heal_card(self.card(last_failure_error="429 rate limit"), False)
         self.assertEqual(("dead_model", False), (got["class"], got["fixed"]))
 
     def test_an_auth_error_is_not_a_model_wall(self):
-        with mock.patch.object(crew_heal, "heal_held_workspace", lambda card, dry: None):
-            self.assertIsNone(crew_heal.heal_card(self.card(last_failure_error="invalid api key"), False))
+        self.assertIsNone(crew_heal.heal_card(self.card(last_failure_error="invalid api key"), False))
 
     def test_a_blocked_card_with_a_proof_command_gets_the_stale_check(self):
-        got = crew_heal.heal_card(self.card(status="blocked", body="proof command: true\n"), False)
+        with mock.patch.object(crew_card, "close_proof_command", return_value="true"):   # the card's snapshot
+            got = crew_heal.heal_card(self.card(status="blocked", body="Role: worker\n"), False)
         self.assertEqual("stale_verify", got["class"])
+
+    def test_a_body_line_alone_is_not_a_proof_command_for_heal(self):
+        with mock.patch.object(crew_card, "close_proof_command", return_value=""):       # no snapshot
+            self.assertIsNone(crew_heal.heal_card(self.card(status="blocked", body="proof command: true\n"), False))
 
     def test_a_blocked_card_with_no_proof_command_gets_nothing(self):
         self.assertIsNone(crew_heal.heal_card(self.card(status="blocked", body="Role: worker\n"), False))
@@ -211,26 +213,19 @@ class HealCardRoutingTests(unittest.TestCase):
 
 
 class ReleaseBlockTests(unittest.TestCase):
-    """release_block lifts a block even when the kernel CLI cannot (a busy board during a proof run)."""
+    """release_block lifts a block even when the kernel CLI cannot (a busy board during a proof run): it calls
+    the kernel's unblock_task itself, on a board made by Hermes's own code."""
 
     def test_a_missing_card_is_not_released_and_a_blocked_one_is(self):
-        db = os.path.join(_TMPDIR, "release.db")
-        conn = sqlite3.connect(db)
-        conn.execute("create table tasks (id text primary key, status text, block_kind text, "
-                     "last_failure_error text)")
-        conn.execute("insert into tasks values ('t_note', 'blocked', 'needs_input', 'boom')")
-        conn.commit()
-        conn.close()
+        kb, conn, db = K.open_board(_TMPDIR)
+        self.addCleanup(conn.close)
+        cid = K.add_card(conn, "blocked")
         with mock.patch.object(crew_heal, "KANBAN_DB", db):
             self.assertFalse(crew_heal.release_block("t_missing"))
-            self.assertTrue(crew_heal.release_block("t_note"))
-        conn = sqlite3.connect(db)
-        try:
-            row = conn.execute("select status, block_kind, last_failure_error from tasks "
-                               "where id = 't_note'").fetchone()
-        finally:
-            conn.close()
-        self.assertEqual(("ready", None, None), tuple(row))
+            self.assertTrue(crew_heal.release_block(cid))
+            self.assertFalse(crew_heal.release_block(cid), "a card that is not blocked any more is not released")
+        self.assertEqual("ready", kb.get_task(conn, cid).status)
+        self.assertEqual(["created", "blocked", "unblocked"], K.events(conn, cid))
 
 
 if __name__ == "__main__":

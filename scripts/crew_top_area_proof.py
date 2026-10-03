@@ -250,7 +250,7 @@ def check_card_box(ws, card, status="blocked"):
     # the rows must not carry them back; the id is the row's, so the chips must not carry it; the
     # role, who and the verifier are the graph's own labels and stay off the box.
     check("the state and the run breakdown are said once",
-          status in chip_text and card not in chip_text
+          status.lower() in chip_text.lower() and card not in chip_text   # chips render upper-case
           and "state" not in rows and "runs" not in rows,
           "chips=%r rows=%s" % (chip_text[:60], sorted(rows)))
     check("the box does not repeat the graph's role, who or verifier",
@@ -355,7 +355,7 @@ def main():
         return 2
     profile = tempfile.mkdtemp(prefix="crew-toparea-")
     proc = subprocess.Popen(
-        [CHROME, "--headless=new", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=%d" % PORT,
+        [CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=%d" % PORT,
          "--user-data-dir=" + profile, "--window-size=1400,900", "%s/card/%s" % (URL, card)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)

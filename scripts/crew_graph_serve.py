@@ -3,21 +3,32 @@
 
   /                 the board: the Hermes kanban as columns, with the role working each card
   /board.json       the same board data, polled every 2s by the page; carries attention.rows
-  /ack/<id>         clear ONE notification off the list (?undo=1 restores it)
-  /ack/all          clear every listed notification at once (?undo=1 restores them); both writes go
-                    into $HERMES_HOME/crew/attention_acks.json - never into the board
+  POST /ack/<id>    clear ONE notification off the list (?undo=1 restores it)
+  POST /ack/all     clear every listed notification at once (?undo=1 restores them); both writes go
+                    into $HERMES_HOME/crew/attention_acks.json - never into the board. POST only, and
+                    only from a same-origin page: a GET answers 405, a cross-site Origin answers 403.
   /card/<id>        live flow graph for one card (polls /card/<id>.json every 2s)
   /card/<id>.json   the graph, rebuilt per request
   /healthz          text probe
 
-Read-only against the board and the session stores. No external assets, no writes.
+Read-only against the board and the session stores. No external assets; the only write is the ack file.
 Bind address and port come from CREW_GRAPH_BIND / CREW_GRAPH_PORT.
+
+The Host header must name this server: 127.0.0.1 / localhost / [::1] on the bound port, or a name listed in
+CREW_GRAPH_HOSTS (comma list, e.g. the tailnet name; a bare name or name:port) - anything else answers 421,
+which closes the DNS-rebinding route to the board. Every HTML response carries a strict CSP with a
+per-response script nonce.
 """
 import importlib.util
 import json
 import os
+import html as _html
+import random
 import re
+import secrets
 import sys
+import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
@@ -27,6 +38,7 @@ DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8799
 BOARD_LIMIT = 200
 DONE_SHOWN = 15
+ARCHIVED_SHOWN = 30            # the Archived column draws the newest of these; its count is the total
 # Five lanes in a fixed order that never changes (ui-spec section 4): an empty lane stays in place and the
 # page draws it as a thin rail, so a column never moves between polls. What waits on the owner comes first.
 # 'ready' and 'todo' are one lane: two columns with the same label is a duplicate, not a status.
@@ -50,7 +62,12 @@ CG = load_graph_module()
 
 
 def esc(text):
-    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    return _html.escape(str(text), quote=True)
+
+
+def js_data(obj):
+    """obj as a JS literal that cannot close the surrounding <script> (< > & become \\u escapes)."""
+    return CG._js_safe(obj)
 
 
 # The board's own rule for the proof suite's scaffolding: a card titled PROBE/TEST is the suite's
@@ -139,14 +156,23 @@ def tile_budget(card_id):
 def board_data(include_all=False, older=False):
     """Every live card with its role and, when a run is alive, the profile working on it now.
 
-    include_all (the page's ?all=1) also lists archived cards, in the 'other' lane. older (the Done lane's
-    "Show N older") lists every done card instead of the newest DONE_SHOWN."""
+    include_all (the page's ?all=1) also lists the proof suite's test cards. Archived cards never enter the
+    counts or the live lanes: they fill the last, owner-collapsed 'archived' lane - the newest ARCHIVED_SHOWN,
+    with `hidden` the rest, so lane tiles + hidden is the total. older (the Done lane's "Show N older")
+    lists every done card instead of the newest DONE_SHOWN."""
     db = CG.kanban_db_path()
     if not db:
         return {"error": "no kanban database", "lanes": [], "counts": {}}
     tasks = CG.q(db, "select id, title, status, assignee, created_at, started_at, completed_at, "
-                     "body, skills, last_failure_error from tasks where (? or status != 'archived') "
-                     "order by created_at desc limit ?", (1 if include_all else 0, BOARD_LIMIT))
+                     "body, skills, last_failure_error from tasks where status != 'archived' "
+                     "order by created_at desc limit ?", (BOARD_LIMIT,))
+    arch_all = [r for r in CG.q(db, "select id, title from tasks where status = 'archived' "
+                                    "order by created_at desc") if include_all or not is_probe_card(r[1])]
+    arch_ids = [r[0] for r in arch_all[:ARCHIVED_SHOWN]]
+    if arch_ids:
+        tasks += CG.q(db, "select id, title, status, assignee, created_at, started_at, completed_at, "
+                          "body, skills, last_failure_error from tasks where id in (%s) "
+                          "order by created_at desc" % ",".join("?" * len(arch_ids)), tuple(arch_ids))
     ids = [t[0] for t in tasks]
     runs = {}
     if ids:
@@ -184,6 +210,8 @@ def board_data(include_all=False, older=False):
         })
     # test cards (the proof suite's PROBE cards) are scaffolding: they never enter the counts or the
     # lanes, so the board's numbers describe the real work. ?all=1 still lists them.
+    archived = [t for t in tiles if t["status"] == "archived"]
+    tiles = [t for t in tiles if t["status"] != "archived"]
     test_cards = [t for t in tiles if t.get("test")]
     if not include_all:
         tiles = [t for t in tiles if not t.get("test")]
@@ -200,6 +228,8 @@ def board_data(include_all=False, older=False):
     other = [t for t in tiles if t["status"] not in claimed]
     if other:
         lanes.append({"key": "other", "label": "Other", "tiles": other, "hidden": 0})
+    lanes.append({"key": "archived", "label": "Archived", "tiles": archived,
+                  "hidden": len(arch_all) - len(archived)})        # always last, far right
     # Only the tiles the page draws are enriched (0.8 ms a card measured): every open card and the shown done.
     for lane in lanes:
         for t in lane["tiles"]:
@@ -363,7 +393,7 @@ BELL_SVG = ("<svg width=15 height=15 viewBox='0 0 24 24' aria-hidden=true fill=c
             "l-2-2z'/></svg>")
 
 
-def board_page(include_all=False):
+def board_page(include_all=False, nonce=None):
     data = board_data(include_all)
     css = CG.dashboard_asset("tokens.css", "crew.css")
     if data.get("error"):
@@ -393,11 +423,12 @@ def board_page(include_all=False):
             # The helpers that draw a lane live at the END of the script body, so the first paint has
             # to come after them: a `draw(INIT)` placed before board.js ran with no helpers defined
             # yet, and the thrown error left the board empty.
-            "<script>var INIT=%s;%s;draw(INIT);</script></body></html>"
+            "<script%s>var INIT=%s;%s;draw(INIT);</script></body></html>"
             % (CG.favicon_link(), css, cards_word(data.get("cards")), live_word(data.get("live")),
                board_counts(data.get("counts")), notes_hint(data.get("attention")),
                BELL_SVG, notes_total(data.get("attention")), attention_head(data.get("attention")),
-               esc(os.uname().nodename), esc(CG.crew_card.dashboard_url()), json.dumps(data),
+               esc(os.uname().nodename), esc(CG.crew_card.dashboard_url()),
+               (' nonce="%s"' % esc(nonce)) if nonce else "", js_data(data),
                CG.dashboard_asset("lib.js", "board.js")))
 
 
@@ -448,22 +479,165 @@ def notes_hint(att):
     return ("%d waiting - click for the list" % total) if total else "nothing waiting"
 
 
+def allowed_hosts(port):
+    """Host header values this server answers to: loopback on the bound port, plus CREW_GRAPH_HOSTS."""
+    ok = {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}
+    for name in (os.environ.get("CREW_GRAPH_HOSTS") or "").split(","):
+        name = name.strip().lower()
+        if name:
+            ok.add(name)
+            if ":" not in name or name.endswith("]"):
+                ok.add("%s:%d" % (name, port))
+    return ok
+
+
+_WHOIS = {}   # tailnet ip -> (expires, tags): one `tailscale whois` per device per minute
+
+
+def peer_tags(ip):
+    """The tags of the tailnet device at `ip` (`tailscale whois`). Tagged devices carry no user, so for them the
+    tag is the identity. Any failure answers no tags: a lookup that cannot be made lets nobody in."""
+    ip = (ip or "").split(",")[0].strip()
+    if not ip:
+        return set()
+    hit = _WHOIS.get(ip)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        r = subprocess.run(["tailscale", "whois", "--json", ip], capture_output=True, text=True, timeout=3)
+        tags = set((json.loads(r.stdout).get("Node") or {}).get("Tags") or []) if r.returncode == 0 else set()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        tags = set()
+    _WHOIS[ip] = (time.time() + 60, tags)
+    return tags
+
+
+def _env_set(name):
+    return {v.strip().lower() for v in (os.environ.get(name) or "").split(",") if v.strip()}
+
+
+def tailnet_user_ok(host, login, port, peer=""):
+    """A request that came in under a CREW_GRAPH_HOSTS name was proxied by `tailscale serve`, which names the caller:
+    Tailscale-User-Login for a person's device, X-Forwarded-For (its tailnet ip) for every device. It is answered
+    for a login in CREW_GRAPH_USERS, or for a device carrying a tag in CREW_GRAPH_TAGS (a tagged device has no
+    login - 2026-10-03, the owner's own laptop is `tag:admin`). install.py --publish writes all three. Loopback
+    requests are this machine's own. Nothing configured: no tailnet."""
+    if (host or "").lower() in {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}:
+        return True
+    if login and login.strip().lower() in _env_set("CREW_GRAPH_USERS"):
+        return True
+    tags = _env_set("CREW_GRAPH_TAGS")
+    return bool(tags) and bool({t.lower() for t in peer_tags(peer)} & tags)
+
+
+FACE_RX = re.compile(r"^/avatars/role/([a-z0-9][a-z0-9_-]{0,39})\.svg$")
+AVATAR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew_dashboard", "avatars")
+_FACE_LOCK = threading.Lock()
+
+
+def face_files():
+    return sorted(n for n in os.listdir(AVATAR_DIR) if re.match(r"^blobs-\d\d\.svg$", n))
+
+
+def role_face(role):
+    """The face file a role shows: picked at random from the shipped set the first time the role is shown (an unused
+    one while any is left) and kept in <base home>/crew/faces.json, so a role keeps its face across restarts,
+    upgrades and pages. `crew-<role>` is <role>."""
+    role = role[len("crew-"):] if role.startswith("crew-") else role
+    files = face_files()
+    if not files:
+        return None
+    path = os.path.join(CG.crew_card.base_home(), "crew", "faces.json")
+    with _FACE_LOCK:
+        try:
+            with open(path) as fh:
+                faces = json.load(fh)
+            faces = faces if isinstance(faces, dict) else {}
+        except (OSError, ValueError):
+            faces = {}
+        if faces.get(role) in files:
+            return faces[role]
+        free = [f for f in files if f not in faces.values()] or files
+        faces[role] = random.choice(free)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(faces, fh, indent=1, sort_keys=True)
+            os.replace(tmp, path)
+        except OSError:
+            pass   # an unwritable home still shows a face, it just is not kept
+        return faces[role]
+
+
+def csp(nonce):
+    """The page policy: nothing but this origin; scripts only with the response's own nonce."""
+    return ("default-src 'self'; script-src 'self'%s; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+            "frame-ancestors 'none'" % ((" 'nonce-%s'" % nonce) if nonce else ""))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "crew-graph"
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, nonce=None, extra=()):
         raw = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", csp(nonce))
+        for k, v in extra:
+            self.send_header(k, v)
         self.end_headers()
         try:
             self.wfile.write(raw)
         except BrokenPipeError:
             pass
 
+    def _host_ok(self):
+        host = (self.headers.get("Host") or "").strip().lower()
+        port = self.server.server_address[1]
+        if host not in allowed_hosts(port):
+            self._send(421, "misdirected request: unknown Host\n", "text/plain; charset=utf-8")
+            return False
+        login = self.headers.get("Tailscale-User-Login") or ""
+        if not tailnet_user_ok(host, login, port, self.headers.get("X-Forwarded-For") or ""):
+            # the refused identity, so an owner locked out of their own board can see what tailscale sent
+            sys.stderr.write("refused tailnet login %r from %r on host %r (allowed: %r, tags %r)\n"
+                             % (login, self.headers.get("X-Forwarded-For") or "", host,
+                                os.environ.get("CREW_GRAPH_USERS") or "", os.environ.get("CREW_GRAPH_TAGS") or ""))
+            self._send(403, "forbidden: this tailnet login is not the dashboard's owner\n", "text/plain; charset=utf-8")
+            return False
+        return True
+
+    def _same_origin(self):
+        """A write must come from this server's own page: Origin (else Referer) names the Host it was sent to."""
+        if (self.headers.get("Sec-Fetch-Site") or "same-origin") not in ("same-origin", "none"):
+            return False
+        src = self.headers.get("Origin") or self.headers.get("Referer") or ""
+        return bool(src) and urlparse(src).netloc.lower() == (self.headers.get("Host") or "").strip().lower()
+
+    def do_POST(self):
+        if not self._host_ok():
+            return
+        parts = urlparse(self.path)
+        path = unquote(parts.path)
+        if not path.startswith("/ack/"):
+            return self._send(404, "not found\n", "text/plain; charset=utf-8")
+        if not self._same_origin():
+            return self._send(403, "cross-site write refused\n", "text/plain; charset=utf-8")
+        rest = path[len("/ack/"):].strip("/")
+        undo = "undo=1" in (parts.query or "")
+        code, text = ack_all(undo=undo) if rest == "all" else ack_card(rest, undo=undo)
+        return self._send(code, text, "text/plain; charset=utf-8")
+
     def do_GET(self):
+        if not self._host_ok():
+            return
         path = unquote(urlparse(self.path).path)
         if path in ("/healthz", "/health"):
             try:
@@ -473,16 +647,22 @@ class Handler(BaseHTTPRequestHandler):
                 body = "ok crew board (no data: %s)\n" % exc
             return self._send(200, body, "text/plain; charset=utf-8")
         show_all = "all=1" in (urlparse(self.path).query or "")
+        nonce = secrets.token_urlsafe(16)
         if path in ("/", "/index.html", "/board"):
-            return self._send(200, board_page(show_all), "text/html; charset=utf-8")
+            return self._send(200, board_page(show_all, nonce), "text/html; charset=utf-8", nonce)
         if path in ("/board.json", "/index.json"):
             older = "older=1" in (urlparse(self.path).query or "")
             return self._send(200, json.dumps(board_data(show_all, older=older)), "application/json")
         if path.startswith("/ack/"):
-            rest = path[len("/ack/"):].strip("/")
-            undo = "undo=1" in (urlparse(self.path).query or "")
-            code, text = ack_all(undo=undo) if rest == "all" else ack_card(rest, undo=undo)
-            return self._send(code, text, "text/plain; charset=utf-8")
+            return self._send(405, "use POST\n", "text/plain; charset=utf-8", extra=(("Allow", "POST"),))
+        m = FACE_RX.match(path)
+        if m:   # a role's face: the shipped file the role was given (role_face), never a path from the URL
+            name = role_face(m.group(1))
+            try:
+                with open(os.path.join(AVATAR_DIR, name or ""), "rb") as fh:
+                    return self._send(200, fh.read(), "image/svg+xml")
+            except OSError:
+                return self._send(404, "not found\n", "text/plain; charset=utf-8")
         if path.startswith("/card/"):
             rest = path[len("/card/"):]
             if rest.endswith(".json"):
@@ -494,9 +674,9 @@ class Handler(BaseHTTPRequestHandler):
             graph, err = CG.build_graph(rest)
             if err:
                 return self._send(404, "no graph for %s (%s)" % (esc(rest), esc(err)),
-                                  "text/html; charset=utf-8")
-            html = CG.render_html(graph, "/card/%s.json" % rest)
-            return self._send(200, html, "text/html; charset=utf-8")
+                                  "text/html; charset=utf-8", nonce)
+            html = CG.render_html(graph, "/card/%s.json" % rest, nonce)
+            return self._send(200, html, "text/html; charset=utf-8", nonce)
         return self._send(404, "not found\n", "text/plain; charset=utf-8")
 
     def log_message(self, fmt, *args):

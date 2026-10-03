@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every profile that runs the crew must carry the same crew: parity by md5, per shipped file.
 
-The crew is installed as a copy per profile (plugin, skill, scripts). A copy that drifts means one
+The crew is installed as a copy per profile (plugin with its scripts, skills). A copy that drifts means one
 role runs different code from the next, and only the copy tells you about it. This compares each file
 the package ships against the copy in every profile that has the plugin installed, and reports the
 pair count, the mismatches and the missing copies.
@@ -29,10 +29,9 @@ def shipped_files(package):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     out = []
+    # PLUGIN_FILES carries the scripts too (plugins/crew/scripts/...): nothing crew runs lives in <profile>/scripts.
     for rel in getattr(mod, "PLUGIN_FILES", []):
         out.append((rel, "plugins/crew/" + rel))
-    for rel in getattr(mod, "SCRIPT_FILES", []):
-        out.append(("scripts/" + rel, "scripts/" + rel))
     for rel in getattr(mod, "ROLE_FILES", []):
         out.append(("roles/" + rel, "roles/crew/" + rel))
     # The role skills a profile loads by name live in its skills/crew/ (the only skills dir a slim role

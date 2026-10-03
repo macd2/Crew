@@ -7,10 +7,10 @@ on its own probe, which reads as a defect in the change that shipped. crew_card 
 filter; this proof shows both directions of it, on a scratch board of its own (never the live one):
 
   1. the dispatcher cannot claim a fixture card (its assignee is no Hermes profile)
-  2. two ready cards held on a permission error, one created_by='probe' and one by a person, both with
-     the same broken workspace: a pass without --probe repairs the person's card and names the probe card
-     as skipped, leaving its workspace broken
-  3. the same pass with --probe repairs the probe card, which is how a proof gets its own cards back
+  2. two blocked cards, one created_by='probe' and one by a person, both carrying an owner-confirmed proof
+     (`proof_confirm` snapshot `true`) that now exits 0, so the stale_verify heal applies to both: a pass
+     without --probe heals the person's card (unblocked) and names the probe card as skipped, leaving it blocked
+  3. the same pass with --probe heals the probe card, which is how a proof gets its own cards back
 
 Run:  python3 crew_probe_skip_proof.py
 Exit: 0 when every check passes, 1 otherwise.
@@ -35,7 +35,7 @@ VENV_PY = crew_proof_board.VENV_PY
 COORD = os.path.join(HERE, "crew_coordinator.py")
 PROBE = "t9probeskip"           # created_by='probe': another run's fixture
 REAL = "t9probeskip_real"       # a normal card beside it, same error, must still be walked
-BROKEN = "/home/nobody/Probe Skip"
+PROOF_CMD = "true"             # the snapshot both cards were opened with; exits 0, so stale_verify lifts the block
 FAILS = []
 
 
@@ -62,20 +62,20 @@ def main():
         if not crew_proof_board.init_board(db):
             print("PROOF FAIL: the scratch board could not be created")
             return 1
-        # no `hermes` call is made on this path (a workspace repair is a database write); should one
-        # ever be, it fails here instead of reaching a real profile
+        # the heal runs the snapshot proof and lifts the block through the kernel's own unblock (a database
+        # write); a `hermes` call, should one be made, fails here instead of reaching a real profile
         env = dict(os.environ, HERMES_HOME=home, HERMES_KANBAN_DB=db, CREW_WORKSPACE_ROOT=os.path.join(tmp, "ws"),
                    HERMES_BIN="/bin/false", CREW_COORDINATOR_DECIDER="/bin/false")
         now = int(time.time())
         conn = sqlite3.connect(db)
         for cid, owner in ((PROBE, "probe"), (REAL, "crew-coordinator")):
             conn.execute("insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
-                         "workspace_kind, workspace_path, last_failure_error) values "
-                         "(?,?,?,?,'ready',0,?,?,'scratch',?,?)",
+                         "workspace_kind) values (?,?,?,?,'blocked',0,?,?,'scratch')",
                          (cid, "probe skip %s" % cid, "Role: worker\nGoal: probe\n", crew_card.FIXTURE_ASSIGNEE,
-                          owner, now, BROKEN, "workspace: [Errno 13] Permission denied: '%s'" % BROKEN))
-            conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
-                         "values (?, NULL, 'respawn_guarded', ?, ?)", (cid, json.dumps({"by": "probe"}), now))
+                          owner, now))
+            for kind, payload in (("proof_confirm", {"proof_cmd": PROOF_CMD}), ("blocked", {"reason": "probe"})):
+                conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
+                             "values (?, NULL, ?, ?, ?)", (cid, kind, json.dumps(payload), now))
         conn.commit()
         conn.close()
 
@@ -88,10 +88,10 @@ def main():
             except ValueError:
                 return {"cards": [], "raw": (raw + p.stderr)[-300:]}
 
-        def workspace(cid):
+        def status(cid):
             c = sqlite3.connect(db)
             try:
-                return c.execute("select workspace_path from tasks where id = ?", (cid,)).fetchone()[0]
+                return c.execute("select status from tasks where id = ?", (cid,)).fetchone()[0]
             finally:
                 c.close()
 
@@ -103,17 +103,13 @@ def main():
 
         rep = pass_report()
         by_card = {c["card"]: c for c in rep.get("cards", [])}
-        healed = workspace(REAL)
-        check("a scheduled pass repairs the person's card", bool(healed) and healed != BROKEN and os.path.isdir(healed)
-              and os.access(healed, os.W_OK), healed)
-        check("the probe card keeps its broken workspace", workspace(PROBE) == BROKEN, workspace(PROBE))
+        check("a scheduled pass heals the person's card", status(REAL) != "blocked", status(REAL))
+        check("the probe card stays blocked", status(PROBE) == "blocked", status(PROBE))
         check("the skipped probe card is named in the report",
               by_card.get(PROBE, {}).get("detail") == "probe fixture", str(by_card.get(PROBE))[:70])
 
         pass_report("--probe")
-        healed = workspace(PROBE)
-        check("--probe repairs the proof's own probe card", bool(healed) and healed != BROKEN and os.path.isdir(healed)
-              and os.access(healed, os.W_OK), healed)
+        check("--probe heals the proof's own probe card", status(PROBE) != "blocked", status(PROBE))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILS:

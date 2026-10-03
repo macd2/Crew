@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Proof for crew_stop.py - the stop pass, and that a stopped card stays down.
+"""Proof for crew_stop.py - the stop pass parks a card (never destroys it), and a parked card stays down.
 
 Checks (each one prints PASS/FAIL with the evidence it measured):
 
   1. the guard: a pid that is not this card's own worker is refused, and the process survives
-  2. a real stop: the card's live worker process dies, its open session row is closed, the card is
-     archived and the card carries a `stopped` audit event
+  2. a real stop PARKS: the card's live worker process dies, its open session row is closed, the card is
+     blocked with the owner-stop reason (Hermes' block_task, `hermes kanban block`), NOT archived
   3. stays down: after the kernel's own recompute_ready (the dispatcher's promotion pass) the card is
-     still archived and no run row was added
+     still blocked and parked, and no run row was added
   4. the id form touches that card only: a second card with a live worker is left ready and alive
-     until it is named
+     until it is named; named with --archive it is archived (the explicit drop)
   5. the family is reported, not followed: an open card linked to the stopped one is named in the
      output and left alone
 
@@ -23,6 +23,7 @@ command line, which is exactly what the guard reads.
 """
 import json
 import os
+from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
@@ -167,7 +168,7 @@ def link(parent, child):
 
 
 def run_stop(args, home):
-    env = dict(os.environ, KANBAN_DB=KANBAN_DB, HERMES_HOME=home)
+    env = dict(os.environ, KANBAN_DB=KANBAN_DB, CREW_STOP_HERMES_ROOT=home)
     return subprocess.run([sys.executable, STOP] + args, capture_output=True, text=True,
                           timeout=120, env=env)
 
@@ -195,11 +196,10 @@ def main():
     home = os.path.join(tmp, "hermes")
     prof = os.path.join(home, "profiles", "crew-worker")
     os.makedirs(prof, exist_ok=True)
-    sdb = sqlite3.connect(os.path.join(prof, "state.db"))
-    sdb.execute("create table sessions (id text primary key, started_at real, ended_at real, title text)")
-    sdb.execute("insert into sessions (id, started_at, ended_at, title) values (?,?,?,?)",
-                (SESSION, time.time(), None, "proof session"))
-    sdb.commit()
+    sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
+    from hermes_state import SessionDB                  # the store crew_stop closes through, so a real one
+    sdb = SessionDB(db_path=Path(os.path.join(prof, "state.db")))
+    sdb.create_session(SESSION, "cli")
     sdb.close()
 
     try:
@@ -216,18 +216,21 @@ def main():
         # 1 + 4 + 5: the id form stops A only
         r = run_stop([CARD_A], home)
         out = r.stdout + r.stderr
-        check("the pass runs and exits 0 on a card it stopped", r.returncode == 0,
+        check("the pass runs and exits 0 on a card it parked", r.returncode == 0,
               "rc=%d %s" % (r.returncode, out.strip().splitlines()[:1]))
         check("A's worker process is dead", not alive(worker_a.pid), "pid %d" % worker_a.pid)
-        check("A is archived", (card_row(CARD_A) or [""])[0] == "archived", card_row(CARD_A))
-        check("A carries a `stopped` audit event", bool(events_of(CARD_A, "stopped")))
+        check("A is parked (blocked), not archived", (card_row(CARD_A) or [""])[0] == "blocked", card_row(CARD_A))
+        check("A carries the owner-stop reason on Hermes' own `blocked` event",
+              CS.crew_card.parked_by_owner(KANBAN_DB, CARD_A) > 0
+              and CARD_A in events_of(CARD_A, "blocked")[-1][0] and not events_of(CARD_A, "archived"),
+              events_of(CARD_A, "blocked")[-1:])
         check("B was not touched by the id form",
               bool(alive(worker_b.pid)) and (card_row(CARD_B) or [""])[0] != "archived",
               "status=%s alive=%s" % (card_row(CARD_B), alive(worker_b.pid)))
         check("the open linked card is named in the output", CARD_B in out, out.strip().splitlines()[-1:])
-        check("A's open session row was closed",
-              sqlite3.connect(os.path.join(prof, "state.db")).execute(
-                  "select ended_at from sessions where id = ?", (SESSION,)).fetchone()[0] is not None)
+        sdb = SessionDB(db_path=Path(os.path.join(prof, "state.db")))
+        check("A's open session row was closed", (sdb.get_session(SESSION) or {}).get("ended_at") is not None)
+        sdb.close()
 
         # 3: two real promotion passes (the dispatcher's own recompute_ready) do not bring it back
         left = ((card_row(CARD_A) or ["?"])[0], len(runs_of(CARD_A)))
@@ -235,8 +238,9 @@ def main():
         time.sleep(1.0)
         second = promotion_pass()
         now = ((card_row(CARD_A) or ["?"])[0], len(runs_of(CARD_A)))
-        check("still archived and unchanged after two promotion passes",
-              now[0] == "archived" and not CS.came_back(left, now), "%s -> %s" % (left, now))
+        check("still parked and unchanged after two promotion passes",
+              now[0] == "blocked" and CS.crew_card.parked_by_owner(KANBAN_DB, CARD_A) > 0
+              and not CS.came_back(left, now), "%s -> %s" % (left, now))
         check("the stopped card is not in the ready lane",
               CARD_A not in (second.stdout + second.stderr),
               [l.strip() for l in (second.stdout + second.stderr).splitlines() if CARD_A in l][:1])
@@ -245,13 +249,16 @@ def main():
         r = run_stop([CARD_C], home)
         check("a foreign pid is refused and survives", alive(foreign.pid) and "refused" in (r.stdout + r.stderr),
               [l for l in (r.stdout + r.stderr).splitlines() if "refused" in l][:1])
-        check("the refused card is still archived (the stop still settles it)",
-              (card_row(CARD_C) or [""])[0] == "archived", card_row(CARD_C))
+        check("the refused card is still parked (the stop still settles it)",
+              (card_row(CARD_C) or [""])[0] == "blocked", card_row(CARD_C))
 
-        # 4: B goes down when it is named
-        r = run_stop([CARD_B], home)
-        check("B stops when its own id is given",
-              (card_row(CARD_B) or [""])[0] == "archived" and not alive(worker_b.pid), r.returncode)
+        # 4: B goes down when it is named; --archive is the explicit drop
+        r = run_stop([CARD_B, "--archive"], home)
+        check("B is archived (not parked) when named with --archive",
+              (card_row(CARD_B) or [""])[0] == "archived" and not alive(worker_b.pid)
+              and bool(events_of(CARD_B, "archived")), r.returncode)
+        r = run_stop(["--archive"], home)
+        check("--archive without a card id is refused", r.returncode == 2, "rc=%d" % r.returncode)
 
         # 6: an unknown id is its own exit code, not a silent success
         r = run_stop(["t_nope_" + SUFFIX], home)

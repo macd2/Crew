@@ -115,7 +115,7 @@ def inner():
           events.get("origin"))
     check("the brief event is the owner's /crew ask", events.get("brief", {}).get("text") == ASK, events.get("brief"))
     subs = q("select count(*) from kanban_notify_subs where task_id = ?", cid)[0][0] if cid else -1
-    check("the kernel's auto-subscription is dropped for a crew card (the feed reports it once)",
+    check("the kernel's auto-subscription is dropped for a crew card (crew_notify reports it once)",
           res.get("subscribed") is True and subs == 0, "subscribed=%s rows=%s" % (res.get("subscribed"), subs))
     verdict2, res2 = call(args, turn="T2")
     check("one /crew, one card: a later turn of that session may not create another",

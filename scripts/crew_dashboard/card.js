@@ -400,6 +400,14 @@ function liveNode(){
 }
 function updateEvent(){
   var el = document.getElementById("event");
+  paintEvent(el);
+  // the event text keeps the line's left and ellipsizes; the run counts sit at its right end
+  var main = document.createElement("span"); main.className = "evmain";
+  while(el.firstChild) main.appendChild(el.firstChild);
+  el.appendChild(main);
+  el.insertAdjacentHTML("beforeend", sitKpisHtml());
+}
+function paintEvent(el){
   var lastRun=null, lastEnd=-1;
   (state.nodes||[]).forEach(function(n){
     if(n.kind==="run" && (n.t1||0)>lastEnd){ lastEnd=n.t1||0; lastRun=n; }
@@ -572,7 +580,7 @@ function pillHTML(text, word){
 }
 function avatarHTML(role, big){
   var hue = ((roleDef(role)||{}).color) || "var(--crew-tone-neutral)";
-  return '<span class="avatar' + (big ? " lg" : "") + '" style="--hue:' + hue + '">' + esc(cap1(role||"?").slice(0,1)) + '</span>';
+  return '<span class="avatar' + (big ? " lg" : "") + '" style="--hue:' + esc(hue) + '">' + esc(cap1(role||"?").slice(0,1)) + '</span>';
 }
 // An id chip IS the copy button; the payload is verbatim "key: value" (owner rule 4).
 function idChip(key, label, value, copyId){
@@ -642,8 +650,10 @@ function panelModel(n){
     if(run && !live && outcome && outcome !== "completed" && (re.summary || re.error))
       m.callout = ["Why this run stopped", re.summary || re.error, re.summary && re.error ? re.error : "", outcome, "panelWhyCopy"];
     var tin = +se.input_tokens || 0, tout = +se.output_tokens || 0, calls = se.tool_call_count || (sess||n).tool_count || 0;
+    calls = +calls || 0;
     var failed = (se.calls_failed !== undefined && se.calls_failed !== null) ? se.calls_failed
                : (sess||n).steps ? (sess||n).steps.filter(function(s){ return s.state==="err"; }).length : 0;
+    failed = +failed || 0;
     m.kpis = [[esc(re.duration || se.duration || "-"), "duration"],
               sess ? [fmtTokens(tin + tout), "tokens · " + fmtTokens(tout) + " out"] : null,
               sess ? [String(calls), "tool calls" + (failed ? ' · <span class="bad">' + failed + ' failed</span>' : "")] : null];
@@ -971,6 +981,16 @@ function renderSitFields(){
   sitFieldRow(box, "coordinator", state.coordinator || "",
     {id: "cardCoCopy", value: state.coordinator || "", title: "copy the coordinator session"});
 }
+// The run counts as a key-number grid (the panel's KPI row), right-aligned on the top event line; a count
+// above zero takes its state's tone.
+function sitKpisHtml(){
+  var s = state.situation || {}, c = s.counts || {};
+  function kpi(v, label, word){ return "<div class='kpi'><div class='kv" + (v && word ? " on" : "") + "' style='--tone:" +
+    toneVar(word || "pending") + "'>" + (+v||0) + "</div><div class='kl'>" + esc(label) + "</div></div>"; }
+  return "<div class='sitkpis' title='" + (+s.runs||0) + " runs: " + (+c.done||0) + " done, " + (+c.blocked||0) + " blocked, " +
+    (+c.failed||0) + " failed, " + (+c.running||0) + " running'>" + kpi(s.runs, "runs", "") + kpi(c.done, "done", "done") +
+    kpi(c.blocked, "blocked", "blocked") + kpi(c.failed, "failed", "failed") + kpi(c.running, "running", "running") + "</div>";
+}
 function renderSituation(){
   var s = state.situation || {};
   var el = document.getElementById("sit");
@@ -984,23 +1004,12 @@ function renderSituation(){
   bits.push("<span class='pill sb " + cls + "' style='--tone:" + toneVar(cls || "pending") + "'>" + esc(s.headline || "-") + "</span>");
   var fp = s.first_pass || {};
   if(fp.rounds) bits.push("<span class='pill sb " + (fp.first_pass ? "done" : "blocked") + "' style='--tone:" +
-    toneVar(fp.first_pass ? "PASS" : "FAIL") + "'>" + (fp.first_pass ? "passed first try" : (fp.fails||0) + " fail(s) before pass") + "</span>");
+    toneVar(fp.first_pass ? "PASS" : "FAIL") + "'>" + (fp.first_pass ? "passed first try" : (+fp.passes||0) ? (+fp.fails||0) + " fail(s) before pass" : "check failed") + "</span>");
   var un = s.units || {};
   if(un.total) bits.push("<span class='pill sd' style='--tone:" + toneVar(un.passed >= un.total ? "PASS" : "pending") + "'>units " +
-    (un.passed||0) + " of " + un.total + " passed</span>");
-  if((s.children||[]).length) bits.push("<span class='pill sd' style='--tone:" + toneVar("pending") + "'>children " + (s.children||[]).length + "</span>");
-  // The runs as a key-number grid (the panel's KPI row); a count above zero takes its state's tone.
-  // The id, the tokens and the card's other facts live in the field chips below (or in the rail).
-  var c = s.counts || {};
-  function kpi(v, label, word){ return "<div class='kpi'><div class='kv" + (v && word ? " on" : "") + "' style='--tone:" +
-    toneVar(word || "pending") + "'>" + (v||0) + "</div><div class='kl'>" + label + "</div></div>"; }
-  bits.push("<div class='sitkpis' title='" + (s.runs||0) + " runs: " + (c.done||0) + " done, " + (c.blocked||0) + " blocked, " +
-    (c.failed||0) + " failed, " + (c.running||0) + " running'>" + kpi(s.runs, "runs", "") + kpi(c.done, "done", "done") +
-    kpi(c.blocked, "blocked", "blocked") + kpi(c.failed, "failed", "failed") + kpi(c.running, "running", "running") + "</div>");
+    (+un.passed||0) + " of " + (+un.total||0) + " passed</span>");
+  if((s.children||[]).length) bits.push("<span class='pill sd' style='--tone:" + toneVar("pending") + "'>children " + (+(s.children||[]).length||0) + "</span>");
   var html = bits.join("");
-  (s.done||[]).slice(0,2).forEach(function(d){
-    html += "<div class='sd sdone' title='" + esc(d) + "'><b>done</b><span>" + esc(d) + "</span></div>";
-  });
   el.innerHTML = html;
   renderSitFields();
   renderSitBox(s, cls);
@@ -1056,10 +1065,26 @@ function fmtAge(sec){
 function renderSitBox(s, cls){
   var box = document.getElementById("sitbox");
   if(!box) return;
-  var reason = s.reason || s.why || "";
+  // A done card shows its done report (the text the owner is sent); any other card its pending reason.
+  var report = state.card_status === "done" ? (state.report || "") : "";
+  var reason = report || s.reason || s.why || "";
   var none = document.getElementById("sitboxNone");
+  var cap = document.getElementById("whyHead");
+  if(cap) cap.textContent = report ? "done report" : "pending reason";
   if(!reason){ box.hidden = true; if(none) none.hidden = false; return; }
   if(none) none.hidden = true;
+  if(report){
+    box.className = "done";
+    var dh = document.getElementById("sitboxHead");
+    dh.querySelector(".sbl").textContent = "delivered";
+    var db = dh.querySelector(".sb");
+    db.className = "sb done";
+    db.textContent = "done";
+    document.getElementById("sitboxWhy").textContent = report;
+    document.getElementById("sitboxMeta").textContent = "what the owner is sent when the card ends";
+    box.hidden = false;
+    return;
+  }
   var you = (s.reason_actor || (s.reason ? "nobody" : "")) === "you" || cls === "blocked";
   box.className = you ? "you" : "nobody";
   var head = document.getElementById("sitboxHead");
@@ -1106,13 +1131,21 @@ function drawAll(){
   updatePanel();
   // The panel is a docked column: opening or closing it resizes the stage, so the graph re-fits once on
   // every change of that state - whichever path changed it (a click, the hash, esc, the canvas).
+  // Once the owner has zoomed or panned, the view is theirs: a panel change keeps the zoom and only shifts by
+  // half the width the stage gained or lost, so the point they were looking at stays put (2026-10-03: a click
+  // on a card used to snap the whole graph back to fit).
   var po = document.getElementById("panel").classList.contains("open");
-  if(po !== FIT_PANEL_OPEN){ FIT_PANEL_OPEN = po; fitted = false; }
+  var w = stageSize().w;
+  if(po !== FIT_PANEL_OPEN){
+    FIT_PANEL_OPEN = po;
+    if(userCam && FIT_STAGE_W !== null){ cam.tx += (w - FIT_STAGE_W)/2; } else { fitted = false; }
+  }
+  FIT_STAGE_W = w;
   if(!fitted){ fitted = true; fitView(); } else { applyCam(); }
   doFollow();
 }
 
-var FIT_PANEL_OPEN = null;
+var FIT_PANEL_OPEN = null, FIT_STAGE_W = null, userCam = false;   // userCam: the owner moved the view
 function openPanel(){ document.getElementById("panel").classList.add("open"); }
 function selectNode(id){
   selected = id; selStep = -1;
@@ -1168,11 +1201,13 @@ function bindInput(){
     var k2 = Math.max(0.12, Math.min(2.5, cam.k * Math.exp(-e.deltaY*0.0015)));
     var wx = (mx - cam.tx)/cam.k, wy = (my - cam.ty)/cam.k;
     cam.k = k2; cam.tx = mx - wx*k2; cam.ty = my - wy*k2;
+    userCam = true;
     if(follow){ follow = false; updateStatus(); }
     applyCam();
   }, {passive:false});
   st.addEventListener("mousedown", function(e){
     if(e.button!==0 || e.target.id==="minimap") return;
+    e.preventDefault();   // a press on the canvas starts a pan, never a text selection across the nodes
     drag = {x:e.clientX, y:e.clientY, tx:cam.tx, ty:cam.ty, moved:false};
     suppressClick = false;
   });
@@ -1180,7 +1215,12 @@ function bindInput(){
     if(!drag) return;
     var dx = e.clientX-drag.x, dy = e.clientY-drag.y;
     if(!drag.moved && Math.abs(dx)+Math.abs(dy) > 4){ drag.moved = true; st.classList.add("drag"); if(follow){ follow=false; updateStatus(); } }
-    if(drag.moved){ cam.tx = drag.tx+dx; cam.ty = drag.ty+dy; applyCam(); }
+    if(drag.moved){ userCam = true; cam.tx = drag.tx+dx; cam.ty = drag.ty+dy; applyCam(); }
+  });
+  st.addEventListener("dblclick", function(e){   // double-click: fit the whole graph again, the view is automatic again
+    if(e.target.id==="minimap") return;
+    if(follow){ follow=false; updateStatus(); }
+    userCam = false; fitView();
   });
   window.addEventListener("mouseup", function(){
     if(drag && drag.moved){ suppressClick = true; setTimeout(function(){ suppressClick = false; }, 0); }
@@ -1193,6 +1233,7 @@ function bindInput(){
     var wx = (e.clientX - r.left - m.ox)/m.sc, wy = (e.clientY - r.top - m.oy)/m.sc;
     var s = stageSize();
     cam.tx = s.w/2 - wx*cam.k; cam.ty = s.h/2 - wy*cam.k;
+    userCam = true;
     if(follow){ follow=false; updateStatus(); }
     applyCam();
   });
@@ -1207,9 +1248,9 @@ document.addEventListener("keydown", function(e){
   else if(e.key==="r"||e.key==="R"){ refresh(); }
   else if(e.key==="?"){ document.getElementById("help").classList.toggle("open"); }
   else if(e.key==="o"||e.key==="O"){ window.location.href = "/"; }
-  else if(e.key==="f"){ if(follow){ follow=false; updateStatus(); } fitView(); }
+  else if(e.key==="f"){ if(follow){ follow=false; updateStatus(); } userCam = false; fitView(); }
   else if(e.key==="F"){ setFollow(!follow); }
-  else if(e.key==="0"){ if(follow){ follow=false; updateStatus(); } resetZoom(); }
+  else if(e.key==="0"){ if(follow){ follow=false; updateStatus(); } userCam = true; resetZoom(); }
   else if(e.key==="Escape"){
     document.getElementById("help").classList.remove("open");
     if(selected){ closePanel(); return; }
@@ -1258,6 +1299,9 @@ function bindRail(){
   setRail(want === "1");
 }
 function boot(){
+  // bound here, not as onclick attributes: the page's CSP allows no inline event handlers
+  var sc = document.getElementById("sitCopy"); if(sc) sc.addEventListener("click", sitCopyClick);
+  var pc = document.getElementById("spinCopy"); if(pc) pc.addEventListener("click", spinCopyClick);
   if(state && state.situation) renderSituation();
   bindInput();
   bindRail();

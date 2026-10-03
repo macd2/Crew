@@ -5,7 +5,7 @@
 /* board page (ui-spec section 4): one-line header, crew bar, five fixed lanes, the desktop card */
 .page-board *{box-sizing:border-box}
 body.page-board{margin:0;background:var(--crew-bg);color:var(--crew-text-1);
-  font:13px/1.45 var(--crew-font);-webkit-font-smoothing:antialiased;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  font:13px/1.45 var(--crew-font);-webkit-font-smoothing:antialiased;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
 .page-board button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .page-board header{display:flex;align-items:center;gap:14px;padding:14px 18px 10px;flex:0 0 auto}
 .page-board h1{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em}
@@ -40,6 +40,7 @@ body.page-board{margin:0;background:var(--crew-bg);color:var(--crew-text-1);
 .page-board header{border-bottom:1px solid var(--crew-stroke-2)}
 .page-board .avatar{display:inline-grid;place-items:center;flex:0 0 auto;border-radius:999px;width:18px;height:18px;
   font-size:9px;font-weight:600;background:color-mix(in srgb, var(--hue) 22%, transparent);color:var(--hue)}
+.page-board .avatar.face{border-radius:6px;object-fit:cover;background:none;padding:0;}
 /* a card's state: a chip tinted in its own tone */
 .page-board .schip{display:inline-flex;align-items:center;white-space:nowrap;border-radius:4px;padding:1px 6px;font-size:10px;
   font-weight:500;background:color-mix(in srgb, var(--tone) 15%, transparent);color:var(--tone)}
@@ -49,6 +50,9 @@ body.page-board{margin:0;background:var(--crew-bg);color:var(--crew-text-1);
   padding:8px;background:var(--crew-fill-3);min-height:0}
 .page-board .lane.rail{flex:0 0 32px;min-width:32px;width:32px;align-items:center;gap:6px}
 .page-board .lane.rail .lt{writing-mode:vertical-rl;margin-top:4px}
+.page-board .lane.rail .ln{margin-top:2px}
+.page-board [data-toggle]{cursor:pointer}
+.page-board .lane.togglable:hover,.page-board .lane.togglable:focus-visible{background:var(--crew-fill-2,var(--crew-fill-3));outline:none}
 .page-board .lh{display:flex;flex:0 0 auto;align-items:center;gap:6px;height:20px;margin:0 4px 6px}
 .page-board .lh i{width:6px;height:6px;border-radius:50%;background:var(--tone)}
 .page-board .lt{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--crew-text-3)}
@@ -127,11 +131,12 @@ body.page-board{margin:0;background:var(--crew-bg);color:var(--crew-text-1);
 /* card page */
 .page-card *{box-sizing:border-box;margin:0;padding:0;}
 html{height:100%}
-body.page-card{height:100%;}
+body.page-card{height:100%;height:100dvh;}
 body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);color:var(--crew-text-2);
   font:12px/1.5 var(--crew-font);overflow:hidden;}
 .page-card #event{flex:0 0 auto;padding:6px 14px;border-bottom:1px solid var(--crew-stroke-1);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;}
+  display:flex;align-items:center;gap:12px;white-space:nowrap;overflow:hidden;font-size:12px;}
+.page-card #event .evmain{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .page-card #event .t{color:var(--crew-text-3);margin-right:8px;}
 .page-card #event .txt{color:var(--crew-text-1);}
 .page-card #main{flex:1 1 auto;display:flex;flex-direction:column;min-height:0;}
@@ -178,19 +183,14 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
 .page-card .foot .chip-tone{padding:0 6px;font-size:9.5px;}
 .page-card #sit{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;max-width:100%;font-size:12px;}
 .page-card #sit > *{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word;}
-/* the run counts: one compact strip on the pills' line - "3 runs | 1 done | 2 blocked ..." */
-.page-card #sit .sitkpis{display:inline-flex;align-items:stretch;border:1px solid var(--crew-stroke-2);border-radius:5px;
-  background:var(--crew-bg);margin-left:auto;}
-.page-card #sit .sitkpis .kpi{display:flex;align-items:baseline;gap:4px;padding:1px 8px;border-left:1px solid var(--crew-stroke-2);}
-.page-card #sit .sitkpis .kpi:first-child{border-left:0;}
-.page-card #sit .sitkpis .kv{font-size:12px;font-weight:600;color:var(--crew-text-1);font-variant-numeric:tabular-nums;}
-.page-card #sit .sitkpis .kv.on{color:var(--tone);}
-.page-card #sit .sitkpis .kl{font-size:10px;color:var(--crew-text-4);}
-.page-card #sit .sdone{flex-basis:100%;display:flex;gap:8px;align-items:baseline;border-radius:5px;padding:3px 8px;
-  background:color-mix(in srgb, var(--crew-tone-done) 7%, transparent);border-left:2px solid var(--crew-tone-done);
-  color:var(--crew-text-2);font-size:11.5px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.page-card #sit .sdone span{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;}
-.page-card #sit .sdone b{font-weight:600;color:var(--crew-tone-done);font-size:11px;flex:0 0 auto;}
+/* the run counts: one compact strip at the right end of the top event line - "3 runs | 1 done | 2 blocked ..." */
+.page-card .sitkpis{display:inline-flex;align-items:stretch;border:1px solid var(--crew-stroke-2);border-radius:5px;
+  background:var(--crew-bg);margin-left:auto;flex:0 0 auto;}
+.page-card .sitkpis .kpi{display:flex;align-items:baseline;gap:4px;padding:1px 8px;border-left:1px solid var(--crew-stroke-2);}
+.page-card .sitkpis .kpi:first-child{border-left:0;}
+.page-card .sitkpis .kv{font-size:12px;font-weight:600;color:var(--crew-text-1);font-variant-numeric:tabular-nums;}
+.page-card .sitkpis .kv.on{color:var(--tone);}
+.page-card .sitkpis .kl{font-size:10px;color:var(--crew-text-4);}
 /* The card's own fields: copy chips, the way the panel shows ids - label, mono value, copy */
 .page-card #sitfields{display:flex;flex-wrap:wrap;align-items:center;gap:4px 5px;min-width:0;max-width:100%;}
 .page-card #sitfields[hidden]{display:none;}
@@ -208,10 +208,12 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
 .page-card #sitbox,.page-card #spinbox{--tone:var(--crew-tone-blocked);margin:0;border:1px solid color-mix(in srgb, var(--tone) 22%, transparent);
   border-left:2px solid var(--tone);border-radius:6px;background:color-mix(in srgb, var(--tone) 7%, transparent);
   font-size:12px;overflow-y:auto;overflow-x:hidden;flex:0 0 auto;}
-.page-card #sitbox{max-height:32vh;}
+.page-card #sitbox{max-height:none;overflow:visible;}   /* only the text scrolls: the head and its copy button stay put */
+.page-card #sitboxWhy{max-height:calc(2.9em + 7px);overflow-y:auto;}   /* 2 lines, so the top area keeps its height */
 .page-card #spinbox{--tone:var(--crew-tone-review);max-height:28vh;}
 .page-card #sitbox[hidden],.page-card #spinbox[hidden]{display:none;}
 .page-card #sitbox.nobody{--tone:var(--crew-tone-review);}
+.page-card #sitbox.done{--tone:var(--crew-tone-done);}
 .page-card #sitboxHead,.page-card #spinboxHead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:5px 9px 0;}
 .page-card #sitboxHead .sbl{font-size:12px;font-weight:500;color:var(--tone);}
 .page-card #sitboxHead .sb{--tone:var(--crew-tone-neutral);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
@@ -233,6 +235,7 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
 .page-card #stage{flex:1 1 auto;position:relative;overflow:hidden;background-color:var(--crew-bg);
   background-image:radial-gradient(circle, var(--crew-stroke-1) 1.3px, transparent 1px);
   background-size:24px 24px;cursor:grab;}
+.page-card #stage{-webkit-user-select:none;user-select:none;}
 .page-card #stage.drag{cursor:grabbing;}
 .page-card #world{position:absolute;top:0;left:0;transform-origin:0 0;}
 .page-card #edges{position:absolute;top:0;left:0;pointer-events:none;overflow:visible;}
@@ -314,7 +317,7 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
 .page-card #scrubber .diam{width:8px;height:8px;border:1px solid var(--crew-text-3);background:transparent;transform:rotate(45deg);}
 .page-card #scrubber .tick.active .diam{border-color:var(--crew-text-1);}
 .page-card #scrubber .tick.playhead .diam{border-color:var(--crew-text-1);background:var(--crew-text-1);}
-.page-card #statusbar{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:7px 14px;
+.page-card #statusbar{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:7px 14px 11px;
   border-top:1px solid var(--crew-stroke-1);background:var(--crew-elevated);font-size:11px;}
 .page-card .pill{background:var(--crew-bg);border:1px solid var(--crew-stroke-1);border-radius:10px;padding:1px 8px;color:var(--crew-text-2);}
 .page-card .pill.btn{cursor:pointer;}

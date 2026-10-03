@@ -10,7 +10,7 @@ mode switch: `/crew <ask>` is always available and normal chat stays untouched o
 
 ```sh
 # 1. install into a profile (copies plugin, scripts, roles, enables the plugin,
-#    sets config, writes the feed unit + the graph http unit, retires the old heal and observer crons)
+#    sets config, writes the graph http unit, retires the old heal and observer crons)
 python3 install.py --profile NAME
 
 # 2. publish the live graph over the tailnet (adds an https mapping for this node's MagicDNS name)
@@ -30,7 +30,7 @@ and an existing plugin dir is backed up to `<profile>/backups/crew-<stamp>/` bef
 ## What `--check` does
 
 `python3 install.py --check --profile NAME` changes nothing. It compares the profile against this
-package and prints exactly what would change (including the feed unit content), then exits 0 when
+package and prints exactly what would change (including the unit content), then exits 0 when
 the install is complete and 1 when something is missing or a role profile's first-call prompt is over
 `prompt_budget_tokens`; it also prints each role profile's skills size and measured first call. Safe to
 run at any time.
@@ -39,20 +39,27 @@ run at any time.
 
 - `--profile NAME`  target profile (default: `HERMES_HOME`, then `~/.hermes`)
 - `--check`         dry run; change nothing, exit 0/1
-- `--no-service`    do not write/enable the `kanban-zulip-feed.service` and `crew-graph-http.service` user units
+- `--no-service`    do not write/enable the `crew-graph-http.service` user unit
 - `--no-cron`       do not register the nightly proofs cron or retire the old heal and observer crons
+- `--nightly-proofs` register the 03:00 proofs cron and its shim in `<profile>/scripts/` (off by default)
+- `--proofs-deliver TARGET`  where the nightly proofs report a failure (default `local`)
+- `--chat-kanban`   enable the kanban toolset on the profile's zulip and telegram platforms (off by default)
+- `--telegram-menu` put the crew commands first in the Telegram command menu (off by default)
+- `--spill-cap`     set `hooks.output_spill.max_chars` on the owner profile (off by default)
 - `--graph-port N`  local port for the graph http service (default 8799)
 - `--https-port N`  tailnet https port used by `--publish` (default 8445)
-- `--publish`       publish the graph over the tailnet with `tailscale serve`
+- `--publish`       publish the graph over the tailnet with `tailscale serve`; only one tailnet login is let in
+- `--publish-user LOGIN`  that login (default: the tailnet's single human login, else `--publish` refuses)
+- `--publish-tag TAGS`  tailnet device tags also let in, comma list (e.g. `tag:admin`); a tagged device has no login
 - `--no-profiles`   do not create/update the role profiles from `templates/`
 - `--profile-prefix P`  name prefix for the role profiles (default `crew-`, so `crew-worker`)
 
 ## Commands
 
-Five entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
+Seven entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
 command's handler can only return text and cannot start a turn, so a pass that needs the model is a
-skill. `/crew-status`, `/crew-graph` and `/crew-stop` are plugin commands, deterministic and free of any model
-call: the option is in the command name, so `/help` and the platform command menus list exactly these five.
+skill. `/crew-status`, `/crew-graph`, `/crew-stop`, `/crew-unstuck` and `/crew-safety` are plugin commands, deterministic and free of any model
+call: the option is in the command name, so `/help` and the platform command menus list exactly these seven.
 Everything else the owner once typed is gone: the coordinator loop heals, retries and asks, and the install
 and role checks are `python3 install.py --check [--profile NAME]` (`hermes plugins doctor crew` only validates
 that the plugin loads and registers; it reports nothing about roles, crons or profile drift).
@@ -62,22 +69,33 @@ that the plugin loads and registers; it reports nothing about roles, crons or pr
                            until every field is the owner's own. The turn opens a 30-minute intake
                            window on that session, so the owner's answer turn opens the card without
                            a second `/crew`; the window closes on the first card out of it. The card is
-                           opened with the kernel's `kanban_create` tool (the installer turns the kanban
+                           opened with the kernel's `kanban_create` tool (`--chat-kanban` turns the kanban
                            toolset on for the chat platforms); a pre_tool_call guard refuses it outside a
                            `/crew` turn or an incomplete contract, rebuilds the body (Coordinator, Origin,
                            budget floor, assignee, skill, route pin) and a post_tool_call hook records the
                            origin, the brief, the units and the route. The turn ends at the card id;
-                           the coordinator loop owns the card and the feed reports its ending
+                           the coordinator loop owns the card and crew_notify reports its ending
 - `/crew-status`           the crew cards in flight (newest eight), each as Title / ID / status / assignee,
                            the coordinator's last decision, and `Needs you: <question>` when the card
                            is blocked on an `ask_owner` decision
-- `/crew-graph <card id|latest> [--watch N | --html [PATH]]`  one card's flow graph (layered box
-                           nodes); `--watch N` renders two frames N seconds apart, `--html [PATH]` writes
-                           the self-contained HTML plus its JSON and prints the absolute paths
-- `/crew-stop [<card id>] [--dry-run]`  stop one card, or every open card, and keep it down: kill each
-                           live run's worker process, close the session row it left open, archive the
-                           card. A bare `stop` does the whole board; `--dry-run` only reports. The open
-                           cards linked to the one it stopped are named, never followed silently
+- `/crew-graph <card id|latest> [--watch N | --html [NAME]]`  one card's flow graph (layered box
+                           nodes); `--watch N` renders two frames N seconds apart, `--html [NAME]` writes
+                           the self-contained HTML (a bare file name, under the profile's `cache/scratch/`) plus its JSON and prints the absolute paths
+- `/crew-stop [<card id>] [--archive] [--dry-run]`  PARK one card, or every open crew card, without destroying
+                           work: kill each live run's worker process (never a pid whose command line it cannot
+                           read), close the session it left open (Hermes's SessionDB), then hold the card with
+                           the reason "stopped by owner (/crew-stop) - continue with /crew-unstuck <id>":
+                           `hermes kanban block` (running/ready; Needs-you lane) or `hermes kanban schedule`
+                           (parent-gated todo, already blocked). The coordinator, heal and notify leave a parked
+                           card alone; the in-session watcher says "stopped by you" once. `--archive <id>` is the
+                           explicit drop (`hermes kanban archive`); a bare `stop` only ever parks, never other
+                           cards' work; `--dry-run` only reports. triage and review cards have no park verb in
+                           the kernel and are reported NOT down. Open cards linked to the stopped one are named,
+                           never followed silently
+- `/crew-unstuck <card id>`  a card the coordinator gave up on goes back in the queue: out of triage with
+                           no change (the kernel's `specify_triage_task`), or `hermes kanban unblock` (also how a parked card continues, with its whole history)
+- `/crew-safety [brave|safe]`  no argument shows the proof safety mode; `brave` sets `approvals.mode: off`
+                           in the crew role profiles, `safe` restores what each had before
 - `/crew-diagnose [state]`  the read-only pass (a skill, so it runs in this session's own turn): every
                            card sitting in that state (`blocked` when none is named) with its id, kind,
                            wait and reason, then how each would resume and who takes that step. It
@@ -86,6 +104,15 @@ that the plugin loads and registers; it reports nothing about roles, crons or pr
 Why two names: a plugin slash command is always dispatched before skills and its handler can only
 return text (it cannot start an agent turn), so the plugin registers `crew-<option>` and never
 `crew`. The intake needs an agent turn, so it is a skill.
+
+### Lessons
+
+`scripts/crew_lessons.py` owns `<base home>/crew/lessons.md` (`- YYYY-MM-DD [roles] text`, roles = worker,
+content, verifier, coordinator or all; max 400 characters a lesson, newest 50 / 8 KB kept, identical roles+text
+stored once). Record: `crew_card.py lesson --role <roles> --text "..."`. Read: the `pre_llm_call` hook
+`crew_handoff_hook` adds a `<crew-lessons>` block (the role's and `all`) to each card session's first turn;
+`crew_intake_preload` appends the `all` ones to `<crew-facts>`. The `pre_tool_call` guard refuses `skill_manage`
+on any skill under the plugin's `skills/` in every profile. The lessons file itself is data, never shipped (the script is).
 
 ## Flow graph
 - The step lines under a card are a six-line terminal window: a new line slides in at the bottom, the oldest slides out, and a tool call in flight ticks a stopwatch on its chip
@@ -115,7 +142,16 @@ a rewritten `proof command:` line can never produce a PASS. The `Verify:` contra
 `proof` (default when a proof command is named: the writer runs `crew_card.py verdict` and closes the card, no
 verifier session, `kanban_request_review` is refused) or `independent` (the writer requests review, the card's
 model pin is swapped for the router's `review` pick, the verifier runs the proof plus one extra check and
-closes it). Either way the coordinator loop re-runs the proof once after the card is done (`by=coordinator`,
+closes it). A proof command that runs a script in a `.crew/` folder (`python3 <landing folder>/.crew/<date-time-slug>/verify.py`, one folder per card) is
+always `independent` (a `proof` card is coerced, `crew_card.coerce_verify`): the VERIFIER writes that script from the
+card's `Done when` (and `Inputs`), never the writer (the plugin's role guard refuses a worker or content write, patch or
+terminal write under `.crew/`; the verifier's file tools reach `.crew/` only). The script is bound by hash at its first
+run; it changes only through a coordinator `revise_script` decision: without `delegate` the script is accepted as it is
+(reason recorded), with `delegate` the card goes to the verifier's review step (`crew_card.send_to_verifier`) to rewrite
+it, and the new hash is recorded with `by=verifier`, the reason and `authorized_by=<decision id>`. A command-only proof
+stays `Verify: proof`. The optional `Inputs:` contract line (paths, URLs, or short quoted text, at most about 2000
+characters) is read by the writer before it starts and checked by the verifier and the coordinator next to `Done when`.
+Either way the coordinator loop re-runs the proof once after the card is done (`by=coordinator`,
 an `audit` decision); a FAIL comments on the done card and opens one follow-up card under it. The owner's override is
 `hermes kanban complete --force` from the CLI, which the coordinator loop records as an `owner_close`
 decision. Two failed verifications go back to the writer (`request-changes`) or block the card as
@@ -171,7 +207,9 @@ skills/crew-role-worker/ + crew-role-content/  what a writer card is forced to l
 scripts/crew_card.py   open a card from a contract, plan a parent with child cards, run a verdict
 scripts/crew_coordinator.py    the coordinator loop: one pass per dispatch tick over the board's events (heal, decide, ask the owner)
 scripts/crew_heal.py           the mechanical remedies the loop calls first (a library; no command of its own)
-scripts/kanban_zulip_feed.py   live kanban->Zulip feed (run by the user unit)
+scripts/crew_notify.py         the owner's return path: done / needs-you / abandoned, once each, via `hermes send` (run by the coordinator pass)
+scripts/crew_lessons.py        the lessons file: record (`crew_card.py lesson`), per-role injection blocks
+scripts/crew_watch.py          the in-session watcher (`crew_card.py watch --card <id>`): the intake runs it as a background terminal so a CLI session is told the ending; records it in notify-state so crew_notify stays silent
 scripts/crew_graph.py          live flow graph (terminal + --watch + self-contained HTML)
 scripts/crew_graph_serve.py    always-on HTTP surface for the graph (/ , /card/<id>, /card/<id>.json, /healthz)
 scripts/crew_option_commands_proof.py  proof that every option is its own command in the live registry
@@ -192,34 +230,30 @@ all, or a pinned file that does not exist exits 2 before anything is created. Ru
 `crew_proofs.py --only <word>`. A proof that reads the dashboard over HTTP starts its own server on the proofs board
 (`crew_proof_board.graph_base()`), and its cleared-notification file lives beside the board, not in the owner's home.
 
-Four held-back proofs are live-service proofs on purpose, because their subject is the live feed, gateway or Zulip
-adapter (`LIVE_BOARD` in `crew_proofs.py`: `crew_notify_proof`, `crew_zulip_route_proof`, `crew_live_walk`,
-`crew_graph_flow_check`). They run only with `--all` or `--card` and unpinned. Three of them seed PROBE cards on the
-live board; `crew_live_walk` does not: it posts to Zulip, opens no card, and only counts the live board read-only.
-Its kernel-only leg (a card opened from a topic records that topic as its origin) runs on a scratch board in
-`crew_origin_open_proof.py`, and the walks of one `Verify: proof` and one `independent` card to done are
-`crew_two_stage_proof.py`.
+One held-back proof is a live-service proof on purpose, because its subject is the live gateway
+(`LIVE_BOARD` in `crew_proofs.py`: `crew_graph_flow_check`). It runs only with `--card` and unpinned and seeds PROBE
+cards on the live board. `crew_notify_proof` runs on a scratch board (`--send TARGET` adds one real `hermes send`). The kernel-only leg (a card opened from a topic
+records that topic as its origin) runs on a scratch board in `crew_origin_open_proof.py`, and the walks of one
+`Verify: proof` and one `independent` card to done are `crew_two_stage_proof.py`.
 
 **PROBE filters stay for now.** The spec removes them after one clean nightly run; that run has not happened, and the
-three live-board proofs above that seed cards still seed PROBE cards on the live board. Remove these, in one commit, once a nightly run
+live-board proofs above that seed cards still seed PROBE cards on the live board. Remove these, in one commit, once a nightly run
 left no `PROBE%` title on the default board (`select count(*) from tasks where title like 'PROBE%'` is 0) and the
-proofs have a feed/gateway of their own on the proofs board:
+proofs have a sender/gateway of their own on the proofs board:
 
 - `scripts/crew_graph_serve.py`: `PROBE_RX` and `is_probe_card` (lines ~54-61), the `"test"` tile key (~137), the
   `test_cards` filter and its `?all=1` reveal (~145-149), the attention-list filter (~295-299).
 - `scripts/crew_card.py`: `PROBE_OWNER`, `probe_card`, and its use in the card list filter (~201-227);
   `scripts/crew_coordinator.py` (~704, the `ctx.probe` skip).
 - `__init__.py`: `PROBE_TITLE_RX` and its two uses in `_open_guard` and `crew_open_hook` (~861, 915, 1362).
-- `scripts/kanban_zulip_feed.py` has no PROBE filter to remove.
 
 ## Uninstall
 
 ```sh
 hermes -p NAME plugins disable crew
-systemctl --user disable --now kanban-zulip-feed.service
 rm -rf ~/.hermes/profiles/NAME/plugins/crew ~/.hermes/profiles/NAME/roles/crew
-rm -f ~/.hermes/profiles/NAME/scripts/kanban_zulip_feed.py \
-      ~/.hermes/profiles/NAME/scripts/crew_graph.py
+systemctl --user disable --now crew-graph-http.service
+rm -f ~/.config/systemd/user/crew-graph-http.service
 ```
 
 (or `hermes -p NAME config unset crew.roles_path crew.source_dir` to drop the recorded keys; for the default

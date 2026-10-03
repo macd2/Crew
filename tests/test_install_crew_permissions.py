@@ -14,10 +14,24 @@ import time
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermes_fake import FakeConfig  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("crew_install", str(REPO / "install.py"))
 CI = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CI)
+
+
+def approve(home, event, command):
+    """What Hermes records when the owner confirms a hook; the installer has no writer for it."""
+    path = os.path.join(home, CI.ALLOWLIST_NAME)
+    data = json.load(open(path)) if os.path.exists(path) else {"approvals": []}
+    data["approvals"].append({"event": event, "command": command, "approved_at": CI._iso(time.time()),
+                              "script_mtime_at_approval": CI._mtime_iso(command)})
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+    os.chmod(path, 0o600)
 
 
 def write_config(home, body):
@@ -111,16 +125,16 @@ class PermissionProblemTests(unittest.TestCase):
         self.assertTrue(any("no consent record" in p for p in problems), problems)
 
     def test_approved_and_fresh_is_clean(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
+        approve(self.home, "pre_tool_call", self.hook)
         self.assertEqual([], CI.permission_problems(self.home))
 
     def test_another_pair_approved_is_not_this_one(self):
-        CI._approve(self.home, "post_tool_call", self.hook)
+        approve(self.home, "post_tool_call", self.hook)
         problems = CI.permission_problems(self.home)
         self.assertTrue(any("declared but not approved" in p for p in problems), problems)
 
     def test_a_script_that_changed_after_approval_is_a_finding(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
+        approve(self.home, "pre_tool_call", self.hook)
         later = time.time() + 3600      # the script was edited after it was approved
         os.utime(self.hook, (later, later))
         problems = CI.permission_problems(self.home)
@@ -132,13 +146,13 @@ class PermissionProblemTests(unittest.TestCase):
         self.assertEqual([], CI.permission_problems(other))
 
     def test_a_home_without_the_exec_bit_is_a_finding(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
+        approve(self.home, "pre_tool_call", self.hook)
         os.chmod(self.hook, 0o644)
         problems = CI.permission_problems(self.home)
         self.assertTrue(any("not executable" in p for p in problems), problems)
 
     def test_a_record_that_is_not_0600_is_a_finding(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
+        approve(self.home, "pre_tool_call", self.hook)
         os.chmod(os.path.join(self.home, CI.ALLOWLIST_NAME), 0o644)
         problems = CI.permission_problems(self.home)
         self.assertTrue(any("mode 644" in p for p in problems), problems)
@@ -150,65 +164,37 @@ class PermissionProblemTests(unittest.TestCase):
         self.assertTrue(any("no approvals list" in p or "unreadable" in p for p in problems), problems)
 
 
-class ApproveTests(unittest.TestCase):
-    """_approve: the writer both the gate and the runtime accept."""
+class NoApprovalWriterTests(unittest.TestCase):
+    """Consent is Hermes's: the installer reads the allowlist, reports what is missing, and never writes it."""
 
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="crew-perm-unit-")
-        self.home = os.path.join(self.tmp, "home")
-        self.hook = os.path.join(self.home, "hooks", "gate.py")
-        os.makedirs(os.path.dirname(self.hook))
-        with open(self.hook, "w") as fh:
-            fh.write("#!/usr/bin/env python3\nprint('{}')\n")
-        os.chmod(self.hook, 0o755)
-        write_config(self.home, "hooks:\n  pre_tool_call:\n      command: %s\n" % self.hook)
+    def test_the_installer_has_no_approval_writer_and_sets_no_accept_hooks_env(self):
+        self.assertFalse(hasattr(CI, "_approve"))
+        self.assertNotIn("HERMES_ACCEPT_HOOKS", (REPO / "install.py").read_text())
 
-    def entry(self):
-        with open(os.path.join(self.home, CI.ALLOWLIST_NAME)) as fh:
-            return json.load(fh)["approvals"]
-
-    def test_it_records_the_runtime_entry_shape(self):
-        self.assertEqual("approved", CI._approve(self.home, "pre_tool_call", self.hook))
-        entry = self.entry()[0]
-        self.assertEqual({"event", "command", "approved_at", "script_mtime_at_approval"},
-                         set(entry))
-        self.assertEqual("pre_tool_call", entry["event"])
-        self.assertTrue(entry["script_mtime_at_approval"].endswith("Z"))
-
-    def test_it_is_idempotent(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
-        before = Path(os.path.join(self.home, CI.ALLOWLIST_NAME)).read_bytes()
-        self.assertEqual("", CI._approve(self.home, "pre_tool_call", self.hook))
-        self.assertEqual(before, Path(os.path.join(self.home, CI.ALLOWLIST_NAME)).read_bytes())
-
-    def test_it_refreshes_a_drifted_pair_and_drops_no_other(self):
-        CI._approve(self.home, "post_tool_call", "/tmp/other.py")
-        old = time.time() - 3600
-        os.utime(self.hook, (old, old))
-        CI._approve(self.home, "pre_tool_call", self.hook)
-        os.utime(self.hook, None)
-        self.assertEqual("refreshed", CI._approve(self.home, "pre_tool_call", self.hook))
-        events = sorted(e["event"] for e in self.entry())
-        self.assertEqual(["post_tool_call", "pre_tool_call"], events)
-
-    def test_the_record_is_0600(self):
-        CI._approve(self.home, "pre_tool_call", self.hook)
-        mode = os.stat(os.path.join(self.home, CI.ALLOWLIST_NAME)).st_mode & 0o777
-        self.assertEqual(0o600, mode)
-
-    def test_it_replaces_a_record_the_runtime_cannot_parse(self):
-        with open(os.path.join(self.home, CI.ALLOWLIST_NAME), "w") as fh:
-            fh.write("{not json")
-        self.assertEqual("approved", CI._approve(self.home, "pre_tool_call", self.hook))
-        self.assertEqual(1, len(self.entry()))
+    def test_the_step_reports_with_the_hermes_command_and_writes_nothing(self):
+        tmp = tempfile.mkdtemp(prefix="crew-perm-unit-")
+        home = os.path.join(tmp, "home")
+        hook = os.path.join(home, "gate.py")
+        os.makedirs(home)
+        Path(hook).write_text("#!/bin/sh\n")
+        os.chmod(hook, 0o755)
+        write_config(home, "hooks:\n  pre_tool_call:\n    - command: %s\n" % hook)
+        saved = CI._role_plans
+        CI._role_plans = lambda prefix: []
+        self.addCleanup(setattr, CI, "_role_plans", saved)
+        for apply in (False, True):
+            status, detail = CI.step_permissions(home, "owner", "crew-", apply)
+            self.assertEqual("FAILED", status)
+            self.assertIn("hermes -p owner chat", detail)
+            self.assertIn("hermes -p owner hooks doctor", detail)
+            self.assertFalse(os.path.exists(os.path.join(home, CI.ALLOWLIST_NAME)))
 
 
 class SettingsProblemTests(unittest.TestCase):
-    """settings_problems: the role's own settings.conf against the home's config.yaml."""
+    """settings_problems: the role's own settings.conf against the profile's config, read through `hermes config get`."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="crew-perm-unit-")
-        self.home = os.path.join(self.tmp, "home")
         self.tpl = os.path.join(self.tmp, "tpl")
         os.makedirs(self.tpl)
         with open(os.path.join(self.tpl, "settings.conf"), "w") as fh:
@@ -216,61 +202,66 @@ class SettingsProblemTests(unittest.TestCase):
                      "fallback_providers = []\n"
                      "# a comment line is ignored\n"
                      "platforms.slack.enabled = false\n")
+        self.cfg = FakeConfig()
+        self.addCleanup(setattr, CI, "h", CI.h)
+        CI.h = self.cfg
 
-    def test_a_matching_home_is_clean(self):
-        write_config(self.home, "crew:\n  role: worker\n"
-                                "fallback_providers: []\n"
-                                "platforms:\n  slack:\n    enabled: false\n")
-        self.assertEqual([], CI.settings_problems(self.home, "worker", self.tpl))
+    def good(self, **over):
+        keys = {"crew.role": "worker", "fallback_providers": "[]", "platforms.slack.enabled": "false"}
+        keys.update(over)
+        self.cfg.store["p"] = keys
+
+    def test_a_matching_profile_is_clean(self):
+        self.good()
+        self.assertEqual([], CI.settings_problems("p", "worker", self.tpl))
 
     def test_a_wrong_role_is_a_finding(self):
-        write_config(self.home, "crew:\n  role: content\n"
-                                "fallback_providers: []\n"
-                                "platforms:\n  slack:\n    enabled: false\n")
-        problems = CI.settings_problems(self.home, "worker", self.tpl)
+        self.good(**{"crew.role": "content"})
+        problems = CI.settings_problems("p", "worker", self.tpl)
         self.assertTrue(any("crew.role" in p for p in problems), problems)
 
     def test_slack_left_on_is_a_finding(self):
-        write_config(self.home, "crew:\n  role: worker\n"
-                                "fallback_providers: []\n"
-                                "platforms:\n  slack:\n    enabled: true\n")
-        problems = CI.settings_problems(self.home, "worker", self.tpl)
+        self.good(**{"platforms.slack.enabled": "true"})
+        problems = CI.settings_problems("p", "worker", self.tpl)
         self.assertTrue(any("platforms.slack.enabled" in p for p in problems), problems)
 
-    def test_a_missing_config_is_a_finding_for_every_key(self):
-        os.makedirs(self.home, exist_ok=True)
-        self.assertEqual(3, len(CI.settings_problems(self.home, "worker", self.tpl)))
+    def test_an_unset_profile_is_a_finding_for_every_key(self):
+        self.assertEqual(3, len(CI.settings_problems("p", "worker", self.tpl)))
 
     def test_no_template_settings_is_clean(self):
-        self.assertEqual([], CI.settings_problems(self.home, "worker", os.path.join(self.tmp, "none")))
+        self.assertEqual([], CI.settings_problems("p", "worker", os.path.join(self.tmp, "none")))
 
 
 class PrefixSettingsTests(unittest.TestCase):
-    """A `{prefix}` in a settings.conf value is the installer's --profile-prefix, in all three readers."""
+    """A `{prefix}` in a settings.conf value is the installer's --profile-prefix, in both the writer and the reader."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="crew-perm-unit-")
-        self.home = os.path.join(self.tmp, "home")
         self.tpl = os.path.join(self.tmp, "tpl")
         os.makedirs(self.tpl)
         with open(os.path.join(self.tpl, "settings.conf"), "w") as fh:
             fh.write("kanban.auto_decompose = false\nkanban.orchestrator_profile = {prefix}coordinator\n")
         self.saved = CI.PROFILE_PREFIX
         self.addCleanup(setattr, CI, "PROFILE_PREFIX", self.saved)
+        self.cfg = FakeConfig()
+        self.addCleanup(setattr, CI, "h", CI.h)
+        CI.h = self.cfg
 
     def test_the_prefix_is_expanded_when_applied_and_when_checked(self):
         CI.PROFILE_PREFIX = "kc-"
-        write_config(self.home, "kanban:\n  orchestrator_profile: owner-chat\n  auto_decompose: true\n")
-        changed = CI._apply_settings(self.home, os.path.join(self.tpl, "settings.conf"))
+        self.cfg.seed("p", kanban__orchestrator_profile="owner-chat", kanban__auto_decompose="true")
+        changed = CI._apply_settings("p", os.path.join(self.tpl, "settings.conf"))
         self.assertEqual(["kanban.auto_decompose", "kanban.orchestrator_profile"], changed)
-        self.assertEqual("kc-coordinator", CI._yaml_read_key(self.home, "kanban.orchestrator_profile"))
-        self.assertEqual("false", CI._yaml_read_key(self.home, "kanban.auto_decompose"))
-        self.assertEqual([], CI.settings_problems(self.home, "worker", self.tpl))
+        self.assertIn(("p", "config", "set", "kanban.orchestrator_profile", "kc-coordinator"), self.cfg.calls)
+        self.assertEqual("kc-coordinator", CI._cfg("p", "kanban.orchestrator_profile"))
+        self.assertEqual("false", CI._cfg("p", "kanban.auto_decompose"))
+        self.assertEqual([], CI.settings_problems("p", "worker", self.tpl))
+        self.assertEqual([], CI._apply_settings("p", os.path.join(self.tpl, "settings.conf")), "second apply: no writes")
 
     def test_a_home_on_another_prefix_is_a_finding(self):
         CI.PROFILE_PREFIX = "crew-"
-        write_config(self.home, "kanban:\n  orchestrator_profile: kc-coordinator\n  auto_decompose: false\n")
-        problems = CI.settings_problems(self.home, "worker", self.tpl)
+        self.cfg.seed("p", kanban__orchestrator_profile="kc-coordinator", kanban__auto_decompose="false")
+        problems = CI.settings_problems("p", "worker", self.tpl)
         self.assertEqual(1, len(problems), problems)
         self.assertIn("crew-coordinator", problems[0])
 
@@ -346,18 +337,24 @@ class MenuPriorityTests(unittest.TestCase):
         self.assertEqual([], CI._menu_names("crew"))
 
     def test_the_old_menu_with_the_removed_commands_is_a_change(self):
-        with tempfile.TemporaryDirectory() as home:
-            with open(os.path.join(home, "config.yaml"), "w") as fh:
-                fh.write("platforms:\n  telegram:\n    extra:\n      command_menu:\n        priority_mode: prepend\n"
-                         "        priority:\n          - crew\n          - crew-status\n          - crew-run\n"
-                         "          - crew-verify\n")
-            status, detail = CI.step_menu_priority(home, "p", False)
-            self.assertEqual("CHANGED", status, detail)
-            self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-diagnose"], CI.CREW_MENU_ORDER)
-            with open(os.path.join(home, "config.yaml"), "w") as fh:
-                fh.write("platforms:\n  telegram:\n    extra:\n      command_menu:\n        priority_mode: prepend\n"
-                         "        priority:\n" + "".join("          - %s\n" % n for n in CI.CREW_MENU_ORDER))
-            self.assertEqual("OK", CI.step_menu_priority(home, "p", False)[0])
+        cfg, saved = FakeConfig(), CI.h
+        CI.h = cfg
+        self.addCleanup(setattr, CI, "h", saved)
+        dotted = "platforms.telegram.extra.command_menu.priority"
+        cfg.seed("p", **{dotted + "_mode": "prepend", dotted: "[crew,crew-status,crew-run,crew-verify]"})
+        status, detail = CI.step_menu_priority("p", False, True)
+        self.assertEqual("CHANGED", status, detail)
+        self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-diagnose"], CI.CREW_MENU_ORDER)
+        self.assertFalse([c for c in cfg.calls if c[1:3] == ("config", "set")], "--check writes nothing")
+        self.assertEqual("CHANGED", CI.step_menu_priority("p", True, True)[0])
+        self.assertEqual("OK", CI.step_menu_priority("p", False, True)[0])
+
+    def test_without_the_flag_the_menu_is_not_touched(self):
+        cfg, saved = FakeConfig(), CI.h
+        CI.h = cfg
+        self.addCleanup(setattr, CI, "h", saved)
+        self.assertEqual("SKIP", CI.step_menu_priority("p", True, False)[0])
+        self.assertEqual([], cfg.calls)
 
 
 class ChatKanbanToolsetTests(unittest.TestCase):
@@ -390,14 +387,23 @@ class ChatKanbanToolsetTests(unittest.TestCase):
         try:
             state = {p: False for p in CI.CHAT_KANBAN_PLATFORMS}
             CI.h, calls = self.fake_h(state)
-            self.assertEqual("CHANGED", CI.step_chat_kanban("p", False)[0])
+            self.assertEqual("CHANGED", CI.step_chat_kanban("p", False, True)[0])
             self.assertFalse([c for c in calls if c[:2] == ("tools", "enable")])      # --check changes nothing
-            self.assertEqual("CHANGED", CI.step_chat_kanban("p", True)[0])
+            self.assertEqual("CHANGED", CI.step_chat_kanban("p", True, True)[0])
             self.assertEqual(sorted(CI.CHAT_KANBAN_PLATFORMS),
                              sorted(c[-1] for c in calls if c[:2] == ("tools", "enable")))
             calls.clear()
-            self.assertEqual("OK", CI.step_chat_kanban("p", True)[0])
+            self.assertEqual("OK", CI.step_chat_kanban("p", True, True)[0])
             self.assertFalse([c for c in calls if c[:2] == ("tools", "enable")])
+        finally:
+            CI.h = orig
+
+    def test_without_the_flag_nothing_is_read_or_enabled(self):
+        orig = CI.h
+        try:
+            CI.h, calls = self.fake_h({p: False for p in CI.CHAT_KANBAN_PLATFORMS})
+            self.assertEqual("SKIP", CI.step_chat_kanban("p", True, False)[0])
+            self.assertEqual([], calls)
         finally:
             CI.h = orig
 
@@ -411,9 +417,134 @@ class ChatKanbanToolsetTests(unittest.TestCase):
             def stubborn(profile, *args):
                 return base(profile, *args) if args[:2] != ("tools", "enable") else base(profile, "tools", "noop", "x")
             CI.h = stubborn
-            self.assertEqual("FAILED", CI.step_chat_kanban("p", True)[0])
+            self.assertEqual("FAILED", CI.step_chat_kanban("p", True, True)[0])
         finally:
             CI.h = orig
+
+
+class OptInStepsTests(unittest.TestCase):
+    """Nothing beyond crew's own files is written without its flag; the nightly cron's delivery is local by default."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="crew-optin-unit-")
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(self.home, "scripts"))
+        self.cfg = FakeConfig()
+        self.saved = (CI.h, CI._cron_id)
+        self.addCleanup(lambda: setattr(CI, "h", self.saved[0]) or setattr(CI, "_cron_id", self.saved[1]))
+        CI.h = self.cfg
+        self.registered = {}
+        CI._cron_id = lambda profile, name: self.registered.get(name)
+
+    def test_the_nightly_cron_needs_its_flag_and_delivers_locally_by_default(self):
+        status, detail = CI.step_proofs_cron("p", self.home, True, False)
+        self.assertEqual("SKIP", status, detail)
+        self.assertEqual([], self.cfg.calls)
+        self.assertEqual("local", CI.CRON_PROOFS_DELIVER)
+        status, detail = CI.step_proofs_cron("p", self.home, True, False, nightly=True)
+        self.assertEqual("CHANGED", status, detail)
+        create = [c for c in self.cfg.calls if c[1:3] == ("cron", "create")][0]
+        self.assertEqual("local", create[create.index("--deliver") + 1])
+        self.assertEqual("crew_proofs.sh", create[create.index("--script") + 1])
+        shim = Path(self.home, "scripts", "crew_proofs.sh")
+        self.assertEqual(CI.PROOFS_SHIM_TEXT, shim.read_text())
+        self.assertTrue(os.access(shim, os.X_OK))
+        self.assertIn("plugins/crew/scripts/crew_proofs.py", shim.read_text())
+
+    def test_proofs_deliver_overrides_the_target_and_no_cron_wins(self):
+        CI.step_proofs_cron("p", self.home, True, False, nightly=True, deliver="telegram")
+        create = [c for c in self.cfg.calls if c[1:3] == ("cron", "create")][0]
+        self.assertEqual("telegram", create[create.index("--deliver") + 1])
+        self.cfg.calls.clear()
+        self.assertEqual("SKIP", CI.step_proofs_cron("p", self.home, True, True, nightly=True)[0])
+        self.assertEqual([], self.cfg.calls)
+
+    def test_a_cron_registered_earlier_stays_and_its_old_script_becomes_the_shim(self):
+        self.registered["Crew proofs (nightly)"] = "abc12345"
+        old = Path(self.home, "scripts", "crew_proofs.sh")
+        old.write_text("#!/bin/sh\nexec python3 \"$(dirname \"$0\")/crew_proofs.py\" --quiet \"$@\"\n")
+        status, _detail = CI.step_proofs_cron("p", self.home, True, False)
+        self.assertEqual("OK", status)
+        status, detail = CI.step_scripts(self.home, True)
+        self.assertEqual("CHANGED", status, detail)
+        self.assertEqual(CI.PROOFS_SHIM_TEXT, old.read_text())
+
+
+class StaleScriptsTests(unittest.TestCase):
+    """step_scripts removes only the crew copies an earlier install put in <profile>/scripts, and lists each one."""
+
+    def test_only_crew_files_go_the_owners_own_scripts_stay_and_every_removal_is_printed(self):
+        import contextlib
+        import io
+        home = tempfile.mkdtemp(prefix="crew-stale-unit-")
+        scripts = os.path.join(home, "scripts")
+        for rel in ("crew_card.py", "crew_dashboard/crew.css", "crew_follow.py", "worker_route.py", "owner_hook.sh"):
+            os.makedirs(os.path.dirname(os.path.join(scripts, rel)), exist_ok=True)
+            Path(scripts, rel).write_text("x")
+        status, detail = CI.step_scripts(home, False)
+        self.assertEqual("CHANGED", status)
+        self.assertTrue(os.path.exists(os.path.join(scripts, "crew_card.py")), "--check removes nothing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            CI.step_scripts(home, True)
+        for rel in ("crew_card.py", "crew_dashboard/crew.css", "crew_follow.py"):
+            self.assertFalse(os.path.exists(os.path.join(scripts, rel)), rel)
+            self.assertIn(os.path.join(scripts, rel), buf.getvalue())
+        self.assertTrue(os.path.exists(os.path.join(scripts, "worker_route.py")))
+        self.assertTrue(os.path.exists(os.path.join(scripts, "owner_hook.sh")))
+        self.assertEqual("OK", CI.step_scripts(home, True)[0])
+
+
+class PluginCarriesScriptsTests(unittest.TestCase):
+    def test_the_plugin_copy_includes_every_script(self):
+        for rel in CI.SCRIPT_FILES:
+            self.assertIn("scripts/" + rel, CI.PLUGIN_FILES)
+
+    def test_step_plugin_copies_scripts_and_is_idempotent(self):
+        home = tempfile.mkdtemp(prefix="crew-plugin-unit-")
+        self.assertEqual("CHANGED", CI.step_plugin(home, True)[0])
+        self.assertTrue(os.path.isfile(os.path.join(home, "plugins", "crew", "scripts", "crew_card.py")))
+        self.assertTrue(os.path.isfile(os.path.join(home, "plugins", "crew", "scripts", "crew_dashboard", "crew.css")))
+        self.assertEqual("OK", CI.step_plugin(home, False)[0])
+
+
+class ResolverTests(unittest.TestCase):
+    """__init__._script_path looks in the plugin's own tree and crew.source_dir, never in $HERMES_HOME/scripts."""
+
+    def test_a_script_only_in_hermes_home_scripts_is_not_found(self):
+        home = tempfile.mkdtemp(prefix="crew-resolve-unit-")
+        os.makedirs(os.path.join(home, "scripts"))
+        Path(home, "scripts", "crew_nowhere.py").write_text("x")
+        spec = importlib.util.spec_from_file_location("crew_plugin_resolve", str(REPO / "__init__.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.HOME = home
+        mod._config_get = lambda key: None
+        self.assertIsNone(mod._script_path("crew_nowhere.py"))
+        self.assertEqual(str(REPO / "scripts" / "crew_card.py"), mod._script_path("crew_card.py"))
+        self.assertEqual(str(REPO / "scripts" / "crew_graph.py"), mod._graph_script())
+
+    def test_crew_source_dir_is_the_fallback(self):
+        src = tempfile.mkdtemp(prefix="crew-resolve-src-")
+        os.makedirs(os.path.join(src, "scripts"))
+        Path(src, "scripts", "crew_only_here.py").write_text("x")
+        spec = importlib.util.spec_from_file_location("crew_plugin_resolve2", str(REPO / "__init__.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod._config_get = lambda key: src if key == "crew.source_dir" else None
+        self.assertEqual(os.path.join(src, "scripts", "crew_only_here.py"), mod._script_path("crew_only_here.py"))
+
+    def test_loading_the_coordinator_leaves_sys_path_and_bare_module_names_alone(self):
+        spec = importlib.util.spec_from_file_location("crew_plugin_resolve3", str(REPO / "__init__.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        path_before = list(sys.path)
+        had = {n for n in ("crew_card", "crew_handoff", "crew_heal") if n in sys.modules}
+        tool = mod._coordinator_tool()
+        self.assertEqual(path_before, sys.path)
+        self.assertEqual(had, {n for n in ("crew_card", "crew_handoff", "crew_heal") if n in sys.modules})
+        self.assertTrue(callable(tool.lock_live) and callable(tool.has_work))
+        self.assertEqual(str(REPO / "scripts" / "crew_coordinator.py"), tool.__file__)
 
 
 if __name__ == "__main__":

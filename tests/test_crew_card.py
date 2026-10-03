@@ -21,7 +21,11 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 os.environ.setdefault("HERMES_BIN", "/bin/false")   # a unit test never starts the real `hermes` (scratch HERMES_HOME bootstraps a runtime and rewrites the live launcher)
 
+sys.path.insert(0, str(REPO / "tests"))
+from unittest import mock  # noqa: E402
+
 import crew_card  # noqa: E402
+import kernel_board as K  # noqa: E402
 
 
 class CardTestCase(unittest.TestCase):
@@ -285,99 +289,254 @@ class CrewBodyTests(unittest.TestCase):
 
 
 class LiftAndRetryTests(CardTestCase):
-    """lift_block / retry_card against a throwaway board: the triage lift and the block-counter reset."""
+    """lift_block / retry_card / unstuck_card on a board made by Hermes's own code (tests/kernel_board.py): a card
+    in triage is a real second same-kind block, and it leaves triage through the kernel's specify_triage_task."""
 
     def setUp(self):
         super().setUp()
-        import sqlite3
-        self.db = os.path.join(self.home, "kanban.db")
-        os.environ["HERMES_KANBAN_DB"] = self.db
-        conn = sqlite3.connect(self.db)
-        conn.executescript(
-            "create table tasks (id text primary key, title text, body text, status text, assignee text, "
-            "block_kind text, block_recurrences integer default 0, consecutive_failures integer default 0, "
-            "last_failure_error text);"
-            "create table task_links (parent_id text, child_id text);"
-            "create table task_events (id integer primary key, task_id text, run_id integer, kind text, "
-            "payload text, created_at integer);")
-        conn.commit()
-        conn.close()
+        self.kb, self.conn, self.db = K.open_board(self.home)
+        self.addCleanup(self.conn.close)
+        self.cli = K.kernel_cli(self.db)
+        patch = mock.patch.object(crew_card.subprocess, "run", self.cli)
+        patch.start()
+        self.addCleanup(patch.stop)
 
-    def card(self, cid, status, kind="needs_input", rec=2, body="Role: worker\nBudget: 200000 tokens\n"):
-        import sqlite3
-        conn = sqlite3.connect(self.db)
-        conn.execute("insert into tasks (id, title, body, status, assignee, block_kind, block_recurrences, "
-                     "consecutive_failures, last_failure_error) values (?,?,?,?,?,?,?,3,'boom')",
-                     (cid, "t", body, status, "crew-worker", kind, rec))
-        conn.commit()
-        conn.close()
+    def task(self, cid):
+        return self.kb.get_task(self.conn, cid)
 
-    def row(self, cid):
-        import sqlite3
-        conn = sqlite3.connect(self.db)
-        try:
-            return conn.execute("select status, block_kind, block_recurrences, consecutive_failures, "
-                                "last_failure_error from tasks where id = ?", (cid,)).fetchone()
-        finally:
-            conn.close()
-
-    def kinds(self, cid):
-        import sqlite3
-        conn = sqlite3.connect(self.db)
-        try:
-            return [r[0] for r in conn.execute("select kind from task_events where task_id = ? order by id", (cid,))]
-        finally:
-            conn.close()
-
-    def test_a_triage_card_goes_back_to_ready_with_its_counters_cleared(self):
-        self.card("t_a", "triage")
-        got = crew_card.lift_block("t_a")
-        self.assertEqual(0, got["rc"])
-        self.assertEqual(("ready", None, 0, 0, None), self.row("t_a"))
-        self.assertEqual(["unblocked"], self.kinds("t_a"))
+    def test_a_triage_card_leaves_triage_with_the_new_approach_and_the_kernel_keeps_its_block_counter(self):
+        cid = K.add_card(self.conn, "triage")
+        self.assertEqual(("triage", 2), (self.task(cid).status, self.task(cid).block_recurrences))
+        new = K.BODY + "\nCoordinator fix 1: try the other endpoint\n"
+        got = crew_card.lift_block(cid, body=new)
+        self.assertEqual((0, "ready"), (got["rc"], got["status"]))
+        self.assertEqual(new, self.task(cid).body)
+        self.assertEqual(2, self.task(cid).block_recurrences, "the counter is the kernel's, not the crew's")
+        self.assertEqual(1, K.events(self.conn, cid).count("specified"))
+        self.assertEqual([], [c for c in self.cli.calls if "unblock" in c], "no raw unblock on a triage card")
 
     def test_a_triage_card_with_an_open_parent_waits_in_todo(self):
-        self.card("t_p", "running", kind=None, rec=0)
-        self.card("t_b", "triage")
-        import sqlite3
-        conn = sqlite3.connect(self.db)
-        conn.execute("insert into task_links values ('t_p', 't_b')")
-        conn.commit()
-        conn.close()
-        crew_card.lift_block("t_b")
-        self.assertEqual("todo", self.row("t_b")[0])
+        parent = K.add_card(self.conn, "ready")
+        cid = K.add_card(self.conn, "triage")
+        self.kb.link_tasks(self.conn, parent, cid)
+        crew_card.lift_block(cid)
+        self.assertEqual("todo", self.task(cid).status)
+
+    def test_a_triage_exit_without_a_body_changes_no_field(self):
+        cid = K.add_card(self.conn, "triage", body=K.BODY)
+        before = self.task(cid)
+        ok, text = crew_card.unstuck_card(cid)
+        after = self.task(cid)
+        self.assertTrue(ok, text)
+        self.assertEqual((before.title, before.body, before.assignee), (after.title, after.body, after.assignee))
+        self.assertEqual("ready", after.status)
+
+    def test_a_blocked_card_is_unblocked_through_the_kernels_command(self):
+        cid = K.add_card(self.conn, "blocked")
+        got = crew_card.lift_block(cid)
+        self.assertEqual((0, "ready"), (got["rc"], got["status"]))
+        self.assertEqual(1, len([c for c in self.cli.calls if "unblock" in c]))
 
     def test_a_card_already_running_is_left_alone(self):
-        self.card("t_r", "ready", kind="needs_input", rec=1)
-        got = crew_card.lift_block("t_r")
-        self.assertEqual("already ready", got["out"])
-        self.assertEqual(("ready", None, 0, 3, "boom"), self.row("t_r")[:5][:1] + (None, 0, 3, "boom"))
+        cid = K.add_card(self.conn, "ready")
+        self.assertEqual("already ready", crew_card.lift_block(cid)["out"])
+        self.assertEqual([], self.cli.calls)
 
     def test_an_unknown_card_is_reported_not_raised(self):
         self.assertEqual(2, crew_card.lift_block("t_none")["rc"])
         self.assertFalse(crew_card.retry_card("t_none")["ok"])
 
-    def test_retry_rewrites_the_budget_line_and_a_dry_run_changes_nothing(self):
-        self.card("t_c", "triage")
-        dry = crew_card.retry_card("t_c", budget=300000, dry_run=True)
+    def test_retry_of_a_triage_card_writes_budget_and_fix_in_the_one_kernel_exit(self):
+        cid = K.add_card(self.conn, "triage")
+        dry = crew_card.retry_card(cid, budget=300000, dry_run=True)
         self.assertEqual((True, 300000), (dry["ok"], dry["budget"]))
-        self.assertIn("Budget: 200000 tokens", self.body("t_c"))
-        crew_card.retry_card("t_c", budget=300000)
-        self.assertIn("Budget: 300000 tokens", self.body("t_c"))
-        self.assertEqual("ready", self.row("t_c")[0])
+        self.assertEqual("triage", self.task(cid).status)
+        res = crew_card.retry_card(cid, budget=300000, body=K.BODY + "Coordinator fix 1: x\n")
+        self.assertEqual("ready", self.task(cid).status)
+        self.assertIn("Budget: 300000 tokens", self.task(cid).body)
+        self.assertIn("Coordinator fix 1: x", self.task(cid).body)
+        self.assertEqual(0, res["unblock"]["rc"])
+        self.assertEqual([], [c for c in self.cli.calls if "edit" in c], "one write, not an edit then a lift")
+        self.assertEqual(1, K.events(self.conn, cid).count("specified"))
 
-    def body(self, cid):
-        import sqlite3
-        conn = sqlite3.connect(self.db)
-        try:
-            return conn.execute("select body from tasks where id = ?", (cid,)).fetchone()[0]
-        finally:
-            conn.close()
+    def test_retry_of_a_blocked_card_edits_the_body_then_unblocks(self):
+        cid = K.add_card(self.conn, "blocked")
+        crew_card.retry_card(cid, budget=300000)
+        self.assertIn("Budget: 300000 tokens", self.task(cid).body)
+        self.assertEqual("ready", self.task(cid).status)
+        self.assertIn("edited", K.events(self.conn, cid))
 
     def test_the_default_ceiling_is_one_and_six_tenths_of_what_was_spent_with_a_floor(self):
-        self.card("t_d", "triage")
-        got = crew_card.retry_card("t_d", dry_run=True)
+        cid = K.add_card(self.conn, "triage")
+        got = crew_card.retry_card(cid, dry_run=True)
         self.assertEqual(crew_card.budget_floor(), got["budget"])       # nothing spent: the floor
+
+    def test_unstuck_refuses_a_card_that_is_not_stuck_or_not_a_crew_card(self):
+        ready = K.add_card(self.conn, "ready")
+        ok, text = crew_card.unstuck_card(ready)
+        self.assertEqual((False, True), (ok, "nothing to unstick" in text))
+        plain = K.add_card(self.conn, "triage", body="just a note")
+        ok, text = crew_card.unstuck_card(plain)
+        self.assertEqual((False, "triage"), (ok, self.task(plain).status))
+        self.assertFalse(crew_card.unstuck_card("t_none")[0])
+
+    def test_unstuck_moves_a_blocked_crew_card_and_says_where_it_went(self):
+        cid = K.add_card(self.conn, "blocked")
+        self.assertEqual((True, "%s: blocked -> ready" % cid), crew_card.unstuck_card(cid))
+
+    def test_release_hold_clears_the_stale_error_through_the_kernel_and_records_it(self):
+        cid = K.add_card(self.conn, "ready")
+        self.conn.execute("update tasks set last_failure_error = 'HTTP 429 quota', consecutive_failures = 3 "
+                          "where id = ?", (cid,))          # seeding the fixture state the kernel's guard reads
+        self.conn.commit()
+        self.assertTrue(crew_card.release_hold(cid))
+        t = self.task(cid)
+        self.assertEqual((None, 0), (t.last_failure_error, t.consecutive_failures))
+        from hermes_cli import kanban_db_dispatch
+        self.assertIsNone(kanban_db_dispatch.check_respawn_guard(self.conn, cid))
+        self.assertIn("hold_released", K.events(self.conn, cid))
+
+    def test_status_lists_a_triage_card_with_its_unstuck_command(self):
+        cid = K.add_card(self.conn, "triage")
+        text = crew_card.status_text()
+        self.assertIn(cid, text)
+        self.assertIn("Needs you: /crew-unstuck %s" % cid, text)
+
+
+class SplitPlanTests(CardTestCase):
+    """run_plan(closeout_proof=...): a split's children carry no proof of their own and the close-out runs the split
+    card's owner-confirmed one. The cards are recorded, not created (create_card / finish_card are replaced)."""
+
+    PROOF = "sh -c 'exit 0'"
+    CHILD = {"title": "a", "goal": "g", "role": "worker", "artifact": "a.md", "lands": "/x", "audience": "me",
+             "done_when": "d", "budget": 150000}
+
+    def setUp(self):
+        super().setUp()
+        self.made = []
+
+        def create(title, body, assignee, skills=(), parents=(), **kw):
+            cid = "t_%d" % (len(self.made) + 1)
+            self.made.append({"id": cid, "title": title, "body": body, "assignee": assignee, "parents": list(parents), **kw})
+            return {"id": cid, "assignee": assignee}
+
+        for p in (mock.patch.object(crew_card, "create_card", create),
+                  mock.patch.object(crew_card, "finish_card", lambda *a, **k: {}),
+                  mock.patch.object(crew_card, "_append_card_event", lambda *a, **k: True),
+                  mock.patch.object(crew_card, "_kanban", lambda *a, **k: mock.Mock(returncode=0, stdout="", stderr=""))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_children_have_no_proof_of_their_own_and_the_closeout_runs_the_split_cards_proof(self):
+        res = crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]}, closeout_proof=self.PROOF)
+        child = next(m for m in self.made if m["id"] == res["children"][0]["id"])
+        self.assertIn("Verify: closeout", child["body"])
+        self.assertEqual("", crew_card.proof_cmd(child["body"]))
+        self.assertIsNone(child.get("model"))
+        closeout = self.made[-1]
+        self.assertEqual("python3 %s closeout --cards %s && (%s)" % (crew_card.SELF, child["id"], self.PROOF),
+                         crew_card.proof_cmd(closeout["body"]))
+
+    def test_a_split_child_closes_without_a_pass_line_and_a_normal_child_still_needs_one(self):
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]}, closeout_proof=self.PROOF)
+        body = self.made[1]["body"]
+        self.assertFalse(crew_card.needs_pass(body))
+        self.assertTrue(crew_card.close_check("t_2", body)[0])
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD, proof_cmd=self.PROOF)]})
+        plain = next(m["body"] for m in self.made if "Verify: proof" in m["body"])
+        self.assertTrue(crew_card.needs_pass(plain))
+
+    def test_a_spec_cannot_ask_for_a_child_without_a_proof(self):
+        with self.assertRaises(ValueError):
+            crew_card.run_plan({"title": "t", "goal": "g",
+                                "children": [dict(self.CHILD, verify="closeout")]})
+        with self.assertRaises(ValueError):                 # no closeout_proof: the proof is still required
+            crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]})
+        self.assertEqual([], self.made)
+
+    def test_the_closeout_check_counts_a_done_split_child_with_no_verdict_but_not_an_open_one(self):
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]}, closeout_proof=self.PROOF)
+        body = self.made[1]["body"]
+        for status, want in (("done", 0), ("running", 1)):
+            with mock.patch.object(crew_card, "card_row", lambda cid, st=status: (cid, "t", st, "w", body)), \
+                    mock.patch.object(crew_card, "all_verdicts", lambda cid: []):
+                self.assertEqual(want, crew_card.cmd_closeout(mock.Mock(cards="t_2")), status)
+
+
+    def test_a_script_proof_closeout_is_independent_and_goes_to_the_verifier_not_a_missing_script_run(self):
+        script = "python3 /srv/site/.crew/verify.py"
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]}, closeout_proof=script)
+        closeout = self.made[-1]["body"]
+        self.assertEqual("independent", crew_card.verify_mode(closeout))
+        self.assertIn(crew_card.role_profile("verifier"), crew_card.closer_profiles(closeout))
+        self.assertNotIn(crew_card.profile_prefix() + "worker", crew_card.closer_profiles(closeout))
+        self.assertIn("kanban_request_review", closeout)
+        self.assertIn('reviewer="%s"' % crew_card.role_profile("verifier"), closeout)
+        self.assertNotIn(" verdict --card", closeout)           # the coordinator never runs the verifier's script
+        self.assertEqual("python3 %s closeout --cards t_2 && (%s)" % (crew_card.SELF, script), crew_card.proof_cmd(closeout))
+        self.assertTrue(crew_card.needs_pass(closeout))
+
+    def test_a_plain_proof_closeout_is_still_run_by_the_coordinator(self):
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD)]}, closeout_proof=self.PROOF)
+        closeout = self.made[-1]["body"]
+        self.assertEqual("", crew_card.verify_mode(closeout))
+        self.assertIn(" verdict --card $HERMES_KANBAN_TASK", closeout)
+        self.assertNotIn("kanban_request_review", closeout)
+
+
+class SendToVerifierTests(CardTestCase):
+    """send_to_verifier on the kernel's real states: the stopped card is lifted and put in review in one step, so a
+    dispatcher claim in between cannot make the review fail."""
+
+    BODY = ("Role: worker\nCoordinator: owner/s\nVerify: independent\nGOAL: g\nDone when: d\n\n"
+            "proof command: python3 /x/.crew/verify.py\n")
+
+    def setUp(self):
+        super().setUp()
+        self.kb, self.conn, self.path = K.open_board(self.home)
+        self.addCleanup(self.conn.close)
+        self.cid = K.add_card(self.conn, "blocked", body=self.BODY)
+        p = mock.patch.object(crew_card, "repin_for_review", lambda cid: {"action": "unchanged"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def status(self):
+        task = self.kb.get_task(self.conn, self.cid)
+        return task.status, task.assignee
+
+    def test_a_blocked_card_goes_to_review_for_the_verifier_in_one_step(self):
+        res = crew_card.send_to_verifier(self.cid, "revise")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(("review", crew_card.role_profile("verifier")), self.status())
+
+    def test_a_dispatcher_claim_between_the_lift_and_the_review_does_not_fail_it(self):
+        real_unblock = self.kb.unblock_task
+
+        def unblock_then_dispatcher_claims(conn, cid):
+            ok = real_unblock(conn, cid)
+            self.assertIsNotNone(self.kb.claim_task(conn, cid))        # the dispatcher wins the card first
+            return ok
+        with mock.patch.object(self.kb, "unblock_task", unblock_then_dispatcher_claims):
+            res = crew_card.send_to_verifier(self.cid, "revise")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(("review", crew_card.role_profile("verifier")), self.status())
+
+    def test_a_card_whose_writer_run_is_already_alive_is_refused_with_the_kernels_reason(self):
+        self.kb.unblock_task(self.conn, self.cid)
+        self.kb.claim_task(self.conn, self.cid)
+        with mock.patch.object(self.kb, "_worker_alive", lambda *a: True):
+            self.conn.execute("update tasks set worker_pid = 1, worker_started_at = 1 where id = ?", (self.cid,))
+            self.conn.commit()
+            res = crew_card.send_to_verifier(self.cid, "revise")
+        self.assertFalse(res["ok"])
+        self.assertIn("live claim", res["why"])
+        self.assertEqual("running", self.status()[0])
+
+    def test_a_writer_proof_card_is_not_sent(self):
+        cid = K.add_card(self.conn, "blocked", body=self.BODY.replace("Verify: independent", "Verify: proof")
+                         .replace("/x/.crew/verify.py", "/x/check.py"))
+        self.assertEqual({"ok": False, "why": "not an independent-verification card"},
+                         crew_card.send_to_verifier(cid, "revise"))
 
 
 class VerdictLineTests(CardTestCase):
@@ -397,6 +556,10 @@ class VerdictLineTests(CardTestCase):
         conn.commit()
         conn.close()
         os.environ["HERMES_KANBAN_DB"] = self.db
+
+    def snap(self, cmd=None):
+        """The snapshot a card gets when it opens: the only proof command a PASS line can be for."""
+        crew_card.record_origin("t_v", env={"origin": "", "session": "s"}, proof_cmd=cmd or self.PROOF)
 
     def event(self, kind, payload=None, at=None):
         conn = sqlite3.connect(self.db)
@@ -452,15 +615,18 @@ class VerdictLineTests(CardTestCase):
         return rec
 
     def test_no_verdict_line_means_no_close(self):
+        self.snap()
         ok, why = self.close()
         self.assertFalse(ok)
         self.assertIn("verdict --card t_v", why)
 
     def test_a_pass_on_the_proof_command_closes(self):
+        self.snap()
         self.put(0)
         self.assertEqual((True, "PASS by crew-worker"), self.close())
 
     def test_a_fail_a_foreign_command_or_the_chat_profile_does_not(self):
+        self.snap()
         self.put(1)
         self.assertFalse(self.close()[0])
         os.remove(crew_card.verdict_path("t_v"))
@@ -471,6 +637,7 @@ class VerdictLineTests(CardTestCase):
         self.assertIn("not by a crew role profile", self.close()[1])
 
     def test_a_pass_from_before_the_newest_claim_is_stale(self):
+        self.snap()
         self.put(0, ts=1000.0)
         self.assertTrue(self.close(claimed=None)[0])
         self.assertFalse(self.close(claimed=2000)[0])
@@ -478,6 +645,7 @@ class VerdictLineTests(CardTestCase):
         self.assertTrue(self.close(claimed=2000)[0])
 
     def test_a_check_that_failed_after_the_pass_holds_the_card_and_the_chip_ends_on_the_same_line(self):
+        self.snap()
         self.put(0, ts=1000.0)
         self.put(1, command="test -f nothing", ts=1001.0)
         ok, why = self.close()
@@ -492,7 +660,7 @@ class VerdictLineTests(CardTestCase):
         body = "Role: worker\nCoordinator: c\nGOAL: g\n\nproof command: (none - the verifier asks for one)\n"
         ok, why = crew_card.close_check("t_v", body)
         self.assertFalse(ok)
-        self.assertIn("no proof command", why)
+        self.assertIn("no owner-confirmed proof command", why)
         parent = "Role: coordinator\nCoordinator: c\n\nGOAL: g\n\nDone when: children done\n"
         self.assertFalse(crew_card.needs_pass(parent))
         self.assertTrue(crew_card.close_check("t_v", parent)[0])
@@ -531,9 +699,8 @@ class VerdictLineTests(CardTestCase):
         self.assertIsNone(crew_card.proof_snapshot("t_v"))
         crew_card.record_origin("t_v", env={"origin": "", "session": "s"}, proof_cmd="sh -c 'exit 0'")
         self.assertEqual("sh -c 'exit 0'", crew_card.proof_snapshot("t_v"))
-        edited = self.body("proof", proof="true")                                       # the line rewritten afterwards
-        self.assertEqual("sh -c 'exit 0'", crew_card.close_proof_command("t_v", edited))
-        self.assertEqual("true", crew_card.close_proof_command("t_none", edited))        # no snapshot: the body line
+        self.assertEqual("sh -c 'exit 0'", crew_card.close_proof_command("t_v"))        # the body line is never read
+        self.assertEqual("", crew_card.close_proof_command("t_none"))                   # no snapshot: no command
 
     def test_a_pass_for_an_edited_proof_line_does_not_close_the_card(self):
         crew_card.record_origin("t_v", env={"origin": "", "session": "s"}, proof_cmd="sh -c 'exit 7'")
@@ -543,18 +710,21 @@ class VerdictLineTests(CardTestCase):
         self.assertFalse(ok)
         self.assertIn("no verdict line for the card's proof command `sh -c 'exit 7'`", why)
 
-    def test_an_applied_rescope_moves_the_snapshot_and_an_unapplied_one_does_not(self):
-        crew_card.record_origin("t_v", env={"origin": "", "session": "s"}, proof_cmd="old")
+    def test_a_rescope_decision_never_moves_the_snapshot_only_the_owners_confirmation_does(self):
+        self.snap("old")
         self.event("crew_decision", {"decision": "rescope", "proof_cmd": "never", "applied": False})
-        self.assertEqual("old", crew_card.proof_snapshot("t_v"))
         self.event("crew_decision", {"decision": "rescope", "proof_cmd": "new", "applied": True})
+        self.assertEqual("old", crew_card.proof_snapshot("t_v"))                       # a model's proposal runs nothing
+        self.event("proof_confirm", {"proof_cmd": "new", "by": "owner"})
         self.assertEqual("new", crew_card.proof_snapshot("t_v"))
+        self.event("proof_confirm", {"proof_cmd": "new", "proof_mode": "brave", "by": "owner"})
+        self.assertEqual("brave", crew_card.proof_snapshot_mode("t_v"))
 
     def test_the_verdict_tool_runs_the_snapshot_not_the_edited_line(self):
-        crew_card.record_origin("t_v", env={"origin": "", "session": "s"}, proof_cmd="sh -c 'exit 5'")
+        self.snap("test -d /no/such/dir/crew")
         conn = sqlite3.connect(self.db)
         conn.execute("insert into tasks values ('t_v', 't', 'running', 'crew-worker', ?)",
-                     (self.body("proof", proof="sh -c 'exit 0'"),))
+                     (self.body("proof", proof="true"),))
         conn.commit()
         conn.close()
         import argparse
@@ -562,9 +732,10 @@ class VerdictLineTests(CardTestCase):
                                   for_event=None)
         self.assertEqual(1, crew_card.cmd_verdict(args))
         line = crew_card.all_verdicts("t_v")[-1]
-        self.assertEqual(("sh -c 'exit 5'", 5, "FAIL"), (line["command"], line["rc"], line["verdict"]))
+        self.assertEqual(("test -d /no/such/dir/crew", 1, "FAIL"), (line["command"], line["rc"], line["verdict"]))
 
     def test_who_may_close_follows_the_verify_line(self):
+        self.snap()
         self.put(0, by="crew-worker")
         self.assertTrue(crew_card.close_check("t_v", self.body("proof"))[0])
         ok, why = crew_card.close_check("t_v", self.body("independent"))
@@ -708,5 +879,39 @@ class StatusTests(CardTestCase):
         self.assertIn("(+2 more)", text)
 
 
+class DecisionDetailTests(unittest.TestCase):
+    """One reader orders a `crew_decision`'s substance: fix, question, why, problem (graph, diagnose, status)."""
+
+    def test_one_reader_orders_fix_question_why_problem(self):
+        self.assertEqual("f", crew_card.decision_detail({"fix": "f", "question": "q", "why": "w"}))
+        self.assertEqual("q", crew_card.decision_detail({"question": "q", "why": "w"}))
+        self.assertEqual("p", crew_card.decision_detail({"problem": "p"}))
+        self.assertEqual("", crew_card.decision_detail({"decision": "verify"}))
+        self.assertEqual("", crew_card.decision_detail(None))
+        self.assertEqual("x" * 10, crew_card.decision_detail({"fix": "x" * 50}, 10))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstPassTests(unittest.TestCase):
+    """'Passed first try' is about the independent check, never the writer's own run (t_d3c396cd, 2026-10-03)."""
+
+    def lines(self, *pairs):
+        return [{"by": by, "verdict": v, "ts": i} for i, (by, v) in enumerate(pairs)]
+
+    def test_a_writer_pass_then_an_audit_fail_is_not_a_first_try_pass(self):
+        with mock.patch.object(crew_card, "all_verdicts",
+                               lambda cid: self.lines(("crew-worker", "PASS"), ("crew-coordinator", "FAIL"))):
+            fp = crew_card.first_pass("t_x")
+        self.assertEqual((False, 0, 1), (fp["first_pass"], fp["passes"], fp["fails"]))
+
+    def test_the_first_judge_pass_counts_and_writer_lines_are_ignored(self):
+        with mock.patch.object(crew_card, "all_verdicts",
+                               lambda cid: self.lines(("crew-worker", "FAIL"), ("crew-verifier", "PASS"))):
+            self.assertTrue(crew_card.first_pass("t_x")["first_pass"])
+
+    def test_no_judge_run_yet_is_no_chip(self):
+        with mock.patch.object(crew_card, "all_verdicts", lambda cid: self.lines(("crew-worker", "PASS"))):
+            self.assertEqual({}, crew_card.first_pass("t_x"))

@@ -7,7 +7,7 @@ discovers every proof beside it, runs each in its own process, keeps the tail of
 exits non-zero when any of them fails, so a cron job or a git hook can gate on it.
 
   crew_proofs.py                     every proof, the live-service ones skipped
-  crew_proofs.py --all               every proof, including the ones that need Zulip or a desktop
+  crew_proofs.py --all               every proof, including the ones that need a live chat or a desktop
   crew_proofs.py --only heal,unstale run the proofs whose file name matches any of these words
   crew_proofs.py --list              what would run, and what is held back, and why
   crew_proofs.py --json              the same result as data
@@ -21,7 +21,7 @@ Every proof runs on the kernel's `crew-proofs` board, never the live one: the ru
 (crew_proof_board.proofs_env). A proof that seeds cards calls crew_proof_board.require_proof_board first
 and exits 2 when it would write to the live default board.
 
-Live-service proofs are held back by default: they post into the Zulip board or drive the desktop
+Live-service proofs are held back by default: they send a real message or drive the desktop
 panel, so they need a reachable server and they leave traces. They run with --all, and they are named
 in --list as skipped, never silently dropped.
 """
@@ -38,22 +38,16 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_proof_board  # noqa: E402
 
-# Proofs that need something outside this box: a live Zulip, a desktop session, a chat round trip.
+# Proofs that need something outside this box: a desktop session, a chat round trip.
 LIVE = {
-    "crew_live_walk.py": "posts a synthetic owner event into Zulip",
-    "crew_zulip_route_proof.py": "needs the Zulip adapter and a stream",
     "crew_panel_click_check.py": "drives the desktop panel",
-    "crew_notify_proof.py": "posts notifications through the gateway",
     "crew_entry_proof.py": "needs the live registry and a chat turn",
-    "kanban_move_notice_proof.py": "posts column notices into Zulip",
-    "kanban_zulip_feed.py": "the feed itself, not a proof",
 }
 
-# Proofs whose subject IS a live service reading the live board (the feed, the gateway, the Zulip adapter)
+# Proofs whose subject IS a live service reading the live board (the gateway)
 # or a live card the owner names, so they run on the live board on purpose and are not pinned. Each one is
 # held back above (LIVE / NEEDS_ARGS), so the nightly run never seeds the live board.
-LIVE_BOARD = {"crew_graph_flow_check.py", "crew_notify_proof.py", "crew_zulip_route_proof.py",
-              "crew_live_walk.py"}
+LIVE_BOARD = {"crew_graph_flow_check.py"}
 # Proofs that only READ real cards off the live board and the live dashboard (they seed nothing), so they
 # run every night and are not pinned: pinned to the proofs board they would find no card to check.
 LIVE_READERS = {"crew_tokens_section_proof.py", "crew_route_trail_proof.py"}

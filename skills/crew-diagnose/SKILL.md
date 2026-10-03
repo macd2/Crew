@@ -17,7 +17,7 @@ owner picks from your plan and starts the acting pass himself.
 
 ## 1. The list comes from one command - the reader
 
-    python3 "$HERMES_HOME/scripts/crew_diagnose.py" [--state STATE]
+    python3 "$HERMES_HOME/plugins/crew/scripts/crew_diagnose.py" [--state STATE]
 
 The state is whatever the owner named after the slash: `blocked`, `triage`, `todo`, `ready`,
 `running`, `done`, `archived`. With no state named, it is `blocked`. Never widen the state the owner

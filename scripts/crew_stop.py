@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Stop crew work: one command that kills it and leaves it down.
+"""Stop crew work without destroying it: kill the worker, park the card, keep everything.
 
-  crew_stop.py <card id>          that one card, nothing else
-  crew_stop.py                    every card that is not done or archived (the open board)
+  crew_stop.py <card id>             PARK that one card: worker killed, session closed, card held for the owner
+  crew_stop.py <card id> --archive   the real drop: as above, then the card is archived (explicit, one card)
+  crew_stop.py                       PARK every CREW card that is not done or archived (a card without a crew
+                                     Coordinator:/Role: line is somebody else's and is never touched). Never archives.
   [--dry-run] [--json] [--quiet]
 
 WHAT ONE STOP DOES, IN ORDER
@@ -10,31 +12,38 @@ WHAT ONE STOP DOES, IN ORDER
   1. kill the process group of every live run of the card (its own worker_pid). A pid that answers
      but is not this card's own worker is never touched - the guard reads the process's command
      line, so the gateway, the board server and the caller are safe by construction.
-  2. close the session row each killed worker left open. A killed worker never writes its session's
-     ended_at, and every surface that reads a session then draws it as running for ever (the card
-     page did, until the row was closed by hand).
-  3. archive the card.
-  4. re-read the card and say so when it came back - the stop is only a stop if it holds.
+  2. close the session row each killed worker left open, through Hermes' own SessionDB.end_session
+     (a killed worker never writes its session's ended_at, and every surface that reads a session then
+     draws it as running for ever). No raw write into a profile's state.db: when hermes_state cannot
+     be imported the sessions are reported as not closed.
+  3. PARK the card with the kernel's own verbs, reason "stopped by owner (/crew-stop) - continue with
+     /crew-unstuck <id>" (crew_card.owner_stop_reason): running/ready -> `hermes kanban block --kind <k>`
+     (the Needs-you lane); todo/blocked -> `hermes kanban schedule`. With --archive: `hermes kanban archive`.
+  4. re-read the card and say so when it did not hold.
 
-WHY ARCHIVE AND NOT BLOCK (measured on the live board, 2026-09-30)
+WHY THIS PARK HOLDS (read from hermes_cli/kanban_db.py, 2026-10-03)
 
-  - a parent-gated `todo` card cannot be blocked at all: kanban_db.block_task only transitions
-    running/ready, and answers `cannot block <id>` for anything else.
-  - cutting one of its parent links is not a stop either: recompute_ready sees all parents done and
-    PROMOTES it to ready (a real `promoted` event), which reads as the card restarting itself.
-  - a second same-kind block is rerouted by the kernel to `triage` (BLOCK_RECURRENCE_LIMIT=2) and
-    triage is what feeds the decomposer, which spawns NEW children - more work, not less.
-  - `archived` holds: recompute_ready reads only todo/blocked, and every dispatch query carries
-    `status != 'archived'`.
+  - recompute_ready skips a `blocked` card whose newest block event is explicit (_has_sticky_block), and reads only
+    todo/blocked, so a `scheduled` card is never promoted; every dispatch query needs ready.
+  - block_task only moves running/ready. A parent-gated `todo` or an already-`blocked` card cannot be blocked, which
+    is what `schedule_task` (todo/ready/running/blocked -> scheduled, not dispatchable, `unblock` re-gates) is for.
+  - the kind: a same-kind re-block routes to `triage` (BLOCK_RECURRENCE_LIMIT) and triage feeds the decomposer,
+    so the kind is the first of needs_input/capability/transient that differs from the card's last block kind.
+  - the coordinator (handle_card), crew_heal.heal_card and crew_notify (card_reports) recognise the reason
+    (crew_card.parked_by_owner) and leave the card alone: no decision, no heal, no "needs you" ping.
+  - triage and review cards have no park verb in the kernel: they are reported as NOT down, never as stopped.
+
+CONTINUE: /crew-unstuck <id> (crew_card.unstuck_card -> `hermes kanban unblock`): the card goes back in the queue
+and the worker resumes with the card's whole history.
 
 THE FAMILY IS REPORTED, NEVER SILENTLY FOLLOWED
 
-  A card the decomposer fanned out keeps its work alive in child cards, which the owner reads as the
-  card restarting on its own. This pass names the open cards linked to the one it stopped; stopping
-  them is a second, explicit ask.
+  A card the decomposer fanned out keeps its work alive in child cards. This pass names the open cards linked to
+  the one it stopped; stopping them is a second, explicit ask.
 
-Run:  python3 crew_stop.py [<card id>] [--dry-run] [--json] [--quiet]
-Exit: 0 when every card it touched is down; 1 when one came back; 2 no board; 3 unknown card id.
+Run:  python3 crew_stop.py [<card id>] [--archive] [--dry-run] [--json] [--quiet]
+Exit: 0 when every card it touched is down; 1 when one came back or could not be parked; 2 no board / bad
+      arguments; 3 unknown card id.
 """
 import argparse
 import json
@@ -44,10 +53,13 @@ import sqlite3
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import crew_card  # noqa: E402
+
 KANBAN_DB = os.environ.get("KANBAN_DB", os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db"))
 # A card in one of these is still somebody's work in progress; done and archived are not.
 OPEN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "review")
@@ -64,33 +76,22 @@ def q(sql, args=()):
         conn.close()
 
 
-def write(sql, args=()):
-    conn = sqlite3.connect(KANBAN_DB)
-    try:
-        cur = conn.execute(sql, args)
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
-
-
-def event(card, kind, payload):
-    """One audit row on the card, the same shape every other crew pass writes."""
-    return write("insert into task_events (task_id, run_id, kind, payload, created_at) values (?,?,?,?,?)",
-                 (card, None, kind, json.dumps(payload), int(time.time())))
+def is_crew_card(card):
+    """A card is crew work only when its body carries the crew Coordinator:/Role: line."""
+    return crew_card.is_crew_body(card.get("body"))
 
 
 # ------------------------------------------------------------------ decisions (pure)
 
 def stop_targets(cards, card_id=None):
-    """The cards this run stops: the named one, or every open card.
+    """The cards this run stops: the named one, or every open crew card.
 
     A named card is returned whether or not it is open - the caller decides what to say about a card
     that is already done or archived, and a stop that silently ignored the id would read as success.
     """
     if card_id:
         return [c for c in cards if c.get("id") == card_id]
-    return [c for c in cards if (c.get("status") or "") not in CLOSED_STATUSES]
+    return [c for c in cards if (c.get("status") or "") not in CLOSED_STATUSES and is_crew_card(c)]
 
 
 def live_runs(runs, alive):
@@ -115,7 +116,7 @@ def is_our_worker(cmdline, card_id):
     a sibling session - fails the guard and is never signalled.
     """
     cmd = cmdline or ""
-    return "work kanban task" in cmd and card_id in cmd
+    return bool(cmd) and "work kanban task" in cmd and card_id in cmd
 
 
 def came_back(before, after):
@@ -123,7 +124,7 @@ def came_back(before, after):
 
     The pass uses it to compare the state it left the card in with the state a later promotion pass
     leaves it in (that is the stays-down check the proof runs): a stop holds only while the status
-    stays `archived` and no run row is added.
+    stays down (parked or archived) and no run row is added.
     """
     return tuple(before) != tuple(after)
 
@@ -204,8 +205,8 @@ def kill_run(run, card_id, dry):
     """Kill one run's worker process group. Returns (word, landed) for the report."""
     pid = int(run["worker_pid"])
     cmd = cmdline_of(pid)
-    if cmd and not is_our_worker(cmd, card_id):
-        return "refused pid %s (not this card's worker)" % pid, False
+    if not is_our_worker(cmd, card_id):      # an empty / unreadable command line is refused too
+        return "refused pid %s (not this card's worker%s)" % (pid, "" if cmd else ": command line unreadable"), False
     if dry:
         return "would kill run %s pid %s" % (run["id"], pid), True
     try:
@@ -246,6 +247,10 @@ def sessions_of(card_id):
 
 
 def hermes_root():
+    """Where the profiles live. CREW_STOP_HERMES_ROOT points the session lookup at a scratch tree (the
+    proof's), leaving HERMES_HOME real so the `hermes kanban` call still runs."""
+    if os.environ.get("CREW_STOP_HERMES_ROOT"):
+        return os.path.abspath(os.environ["CREW_STOP_HERMES_ROOT"])
     home = os.path.abspath(os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes"))
     if os.path.basename(os.path.dirname(home)) == "profiles":
         return os.path.dirname(os.path.dirname(home))
@@ -260,32 +265,36 @@ def session_db(profile):
 
 
 def close_sessions(card_id, dry):
-    """Close every session row this card's workers left open.
+    """Close every session row this card's workers left open, through Hermes' SessionDB.end_session.
 
     A killed worker never reaches its own exit path, so ended_at stays NULL and each surface that
     asks a session whether it is running answers yes for ever.
     """
     closed, skipped = [], []
+    src = os.environ.get("HERMES_SRC") or os.path.expanduser("~/.hermes/hermes-agent")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.append(src)
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        return closed, ["%s (hermes_state not importable here)" % sid for sid, _ in sessions_of(card_id)]
     for sid, prof in sessions_of(card_id):
         path = session_db(prof)
         if not os.path.exists(path):
             skipped.append("%s (no %s)" % (sid, os.path.basename(path)))
             continue
         try:
-            conn = sqlite3.connect(path, timeout=10)
-            row = conn.execute("select ended_at from sessions where id = ?", (sid,)).fetchone()
-            if row is None or row[0] is not None:
-                conn.close()
-                continue
-            if dry:
-                closed.append("%s (would close)" % sid)
-            else:
-                conn.execute("update sessions set ended_at = ? where id = ? and ended_at is null",
-                             (time.time(), sid))
-                conn.commit()
-                closed.append(sid)
-            conn.close()
-        except sqlite3.Error as exc:
+            sdb = SessionDB(db_path=Path(path))
+            try:
+                sess = sdb.get_session(sid)
+                if not sess or sess.get("ended_at") is not None:
+                    continue
+                if not dry:
+                    sdb.end_session(sid, "crew_stop")
+                closed.append(sid if not dry else "%s (would close)" % sid)
+            finally:
+                sdb.close()
+        except Exception as exc:  # noqa: BLE001 - one unreadable store must not stop the stop
             skipped.append("%s (%s)" % (sid, exc))
     return closed, skipped
 
@@ -299,11 +308,45 @@ def snapshot(card_id):
 
 def archive_card(card_id, dry):
     if dry:
-        return 0
-    return write("update tasks set status = 'archived' where id = ? and status != 'archived'", (card_id,))
+        return 0, ""
+    done = subprocess.run([crew_card.hermes_bin(), "kanban", "archive", card_id], capture_output=True, text=True,
+                          timeout=120, env=dict(os.environ, HERMES_KANBAN_DB=KANBAN_DB))
+    return 1 if done.returncode == 0 else 0, (done.stdout + done.stderr).strip()
 
 
-def stop_card(card, dry=False):
+PARK_KINDS = ("needs_input", "capability", "transient")
+
+
+def park_kind(card_id):
+    """The block kind for the park: the first that differs from the card's last one, because a same-kind re-block
+    is the kernel's loop breaker and routes the card to triage (BLOCK_RECURRENCE_LIMIT)."""
+    rows = q("select block_kind from tasks where id = ?", (card_id,))
+    last = rows[0]["block_kind"] if rows else None
+    return next(k for k in PARK_KINDS if k != last)
+
+
+def park_card(card_id, dry):
+    """Park the card with the kernel's own verb for its state. Returns (status word, output)."""
+    status = (q("select status from tasks where id = ?", (card_id,)) or [{"status": "?"}])[0]["status"]
+    reason = crew_card.owner_stop_reason(card_id)
+    if crew_card.parked_by_owner(KANBAN_DB, card_id):
+        return "already parked", ""
+    if status in ("running", "ready"):
+        argv = ["block", card_id, "--kind", park_kind(card_id), reason]
+    elif status in ("todo", "blocked"):
+        argv = ["schedule", card_id, reason]
+    elif status == "scheduled":
+        return "already parked", ""
+    else:
+        return "cannot park a %s card" % status, ""
+    if dry:
+        return "would %s" % argv[0], ""
+    done = subprocess.run([crew_card.hermes_bin(), "kanban"] + argv, capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, HERMES_KANBAN_DB=KANBAN_DB))
+    return argv[0] if done.returncode == 0 else "%s refused" % argv[0], (done.stdout + done.stderr).strip()
+
+
+def stop_card(card, dry=False, archive=False):
     """One card, in the order the docstring promises. Returns (report, ok, json facts)."""
     card_id = card["id"]
     before = snapshot(card_id)
@@ -316,10 +359,11 @@ def stop_card(card, dry=False):
         if landed:
             killed.append(r)
     closed, skipped = close_sessions(card_id, dry)
-    archive_card(card_id, dry)
-    if not dry:
-        event(card_id, "stopped", {"by": "crew_stop", "runs_killed": [r["id"] for r in killed],
-                                   "sessions_closed": closed})
+    if archive:
+        _archived, archive_msg = archive_card(card_id, dry)
+        park_word = "archived"
+    else:
+        park_word, archive_msg = park_card(card_id, dry)
     after = snapshot(card_id) if not dry else before
     # a killed worker that still answers (the guard refused it, or the signal did not land) is the
     # one thing a stop may not report as done
@@ -329,32 +373,45 @@ def stop_card(card, dry=False):
               (card_id, card_id, card_id))
     cards = q("select id, status, assignee from tasks")
     family = family_of([dict(l) for l in links], cards)
-    ok = True if dry else (after[0] == "archived" and not still_live)
+    if dry:
+        ok = True
+    elif archive:
+        ok = after[0] == "archived" and not still_live
+    else:
+        ok = (after[0] == "scheduled" or (after[0] == "blocked" and bool(crew_card.parked_by_owner(KANBAN_DB, card_id)))) \
+            and not still_live
     facts = {"card": card_id, "before": before, "after": after, "runs_killed": [r["id"] for r in killed],
-             "sessions_closed": closed, "sessions_skipped": skipped, "family": family, "still_down": ok,
+             "sessions_closed": closed, "sessions_skipped": skipped, "family": family, "still_down": ok, "parked": (not archive and ok), "how": park_word,
              "kill_words": kill_words}
     lines = report_lines(card, killed, closed, not dry, after, family)
+    if ok and not dry and not archive:
+        lines.append("  parked (%s): stays on the board with its history - /crew-unstuck %s to continue" % (park_word, card_id))
     lines += ["  " + w for w in kill_words if "dead" not in w and "would kill" not in w]
     if skipped:
         lines.append("  session(s) not closed: " + ", ".join(skipped))
     if not ok:
+        lines.append("  %s said: %s" % ("archive" if archive else park_word, (archive_msg or "(nothing)")[-300:]))
         lines.append("  NOT DOWN: status=%s still running=%s - the stop did not hold"
                      % (after[0], [r["id"] for r in still_live]))
     return lines, ok, facts
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Stop crew work and keep it down.")
-    ap.add_argument("card", nargs="?", help="one card id; without it every open card is stopped")
+    ap = argparse.ArgumentParser(description="Stop crew work: park the card, keep its history.")
+    ap.add_argument("card", nargs="?", help="one card id; without it every open crew card is parked")
+    ap.add_argument("--archive", action="store_true",
+                    help="drop the card for good (archive it) instead of parking it; needs a card id")
     ap.add_argument("--dry-run", action="store_true", help="report what would be stopped")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--quiet", action="store_true", help="only the failing cards and the count")
     args = ap.parse_args(argv)
 
+    if args.archive and not args.card:
+        ap.error("--archive drops a card for good: name the card (the all-cards form only parks)")
     if not os.path.exists(KANBAN_DB):
         print("no board at %s" % KANBAN_DB)
         return 2
-    cards = q("select id, status, assignee, title from tasks")
+    cards = q("select id, status, assignee, title, body from tasks")
     if args.card:
         targets = stop_targets([dict(c) for c in cards], args.card)
         if not targets:
@@ -372,7 +429,7 @@ def main(argv=None):
     if not args.quiet:
         print("crew stop - %s  %d card(s)%s" % (mode, len(targets), "  (--dry-run)" if args.dry_run else ""))
     for card in targets:
-        lines, ok, facts = stop_card(card, args.dry_run)
+        lines, ok, facts = stop_card(card, args.dry_run, args.archive)
         results.append(facts)
         if not ok:
             fails.append(card["id"])

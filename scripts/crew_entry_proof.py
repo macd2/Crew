@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Proof that the crew starts only on /crew and that the whole path works over Zulip.
+"""Proof that the crew starts only on /crew and that the path from a chat works.
 
 Done when the intake can only be started by the owner typing the literal `/crew ...` command - the
 bare word does not count - the guard refuses a hand-made card open in any other turn (coordinator
 included), a `/crew` turn leaves its session able to open the card for the intake window so the
 owner's answer turn needs no second /crew, that window closes on the first card and expires, the
-pre-armed probes can still seed their cards, and the Zulip legs are in place: the skill owns
+pre-armed probes can still seed their cards, and the chat legs are in place: the skill owns
 `/crew` (no plugin command shadows it), the gateway rewrites a skill slash before the turn, the
-skill is not disabled, the Zulip adapter asks clarify with numbered reactions, and a card opened
-from a chat records that chat as its origin verbatim.
+skill is not disabled, and a card opened from a chat records that chat as its origin verbatim.
 
 Contract pinned here (drives the installed plugin entry points, exactly as the runtime calls them):
   crew_intake_preload(user_message=..., session_id=..., turn_id=...)
@@ -43,8 +42,7 @@ import crew_card  # noqa: E402 - the owner profile, the base home and the packag
 PKG = crew_card.package_dir() or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE = os.environ.get("CREW_PROFILE") or crew_card.owner_home()
 HERMES_SRC = os.environ.get("HERMES_SRC") or os.path.expanduser("~/.hermes/hermes-agent")
-ZULIP_PLUGIN = os.path.join(PROFILE, "plugins", "zulip-platform")
-CARD_TOOL = os.path.join(PROFILE, "scripts", "crew_card.py")
+CARD_TOOL = os.path.join(PROFILE, "plugins", "crew", "scripts", "crew_card.py")
 RULE_SENTENCE = "Crew starts only on /crew"
 FAILURES = []
 
@@ -80,7 +78,7 @@ def load_plugin(path, name):
     return mod
 
 
-OPEN_CMD = "python3 \"$HERMES_HOME/scripts/crew_card.py\" open --title 'wordpress gate' --goal x --role worker --artifact a --lands b --audience c --done-when d --proof-cmd true --units e --constraints f"
+OPEN_CMD = "python3 \"$HERMES_HOME/plugins/crew/scripts/crew_card.py\" open --title 'wordpress gate' --goal x --role worker --artifact a --lands b --audience c --done-when d --proof-cmd true --units e --constraints f"
 PLAIN_MSG = "make the landing page convert better"
 TRIGGER_SLASH = "/crew make the landing page convert better"
 BARE_WORD = "crew make the landing page convert better"
@@ -181,7 +179,7 @@ def main():
           str(getattr(plug, "INTAKE_WINDOW_SECONDS", None)))
     for sub in ("status --card t_x", "verdict --card t_x", "retry --card t_x"):
         check("crew_card.py %s is not gated" % sub.split()[0],
-              not is_block(guard(plug, "python3 $HERMES_HOME/scripts/crew_card.py " + sub, "S-plain", "T1")))
+              not is_block(guard(plug, "python3 $HERMES_HOME/plugins/crew/scripts/crew_card.py " + sub, "S-plain", "T1")))
     check("other tools are untouched",
           plug.crew_tool_guard(tool_name="read_file", args={"path": "/etc/hostname"},
                                session_id="S-plain", turn_id="T1") in (None, {}))
@@ -210,7 +208,7 @@ def main():
     check("the skill says the intake turn ends when its cards are open",
           bool(re.search(r"(turn ends|ends? the turn|stops there|nothing else is dispatched)", skill, re.I)))
 
-    # --- Zulip legs -----------------------------------------------------------------------------
+    # --- chat legs ------------------------------------------------------------------------------
     plugin_src = read(os.path.join(PROFILE, "plugins", "crew", "__init__.py"))
     check("no plugin command shadows /crew",
           "for name, action, hint, desc in COMMANDS:" in plugin_src
@@ -222,12 +220,6 @@ def main():
     body = disabled.group(1) if disabled else ""
     check("the crew skill is not disabled for the gateway",
           bool(body) and not re.search(r"^\s*-\s*crew\s*$", body, re.M))
-    adapter = read(os.path.join(ZULIP_PLUGIN, "zulip_platform", "adapter.py"))
-    check("the Zulip adapter asks clarify", "async def send_clarify" in adapter)
-    check("the Zulip adapter retires a dead clarify card", "async def retire_clarify_card" in adapter)
-    check("the Zulip adapter maps number reactions to choices",
-          bool(re.search(r"pick a clarify choice by index", adapter))
-          and "resolve_gateway_clarify" in adapter)
     try:
         help_text = subprocess.run([sys.executable, CARD_TOOL, "open", "--help"],
                                    capture_output=True, text=True, timeout=60).stdout
@@ -254,7 +246,7 @@ def main():
         print("PROOF FAIL: %d check(s) failed: %s" % (len(FAILURES), "; ".join(FAILURES)))
         return 1
     print("PROOF OK: the crew starts only on the owner's trigger, a hand-made open in any other turn "
-          "is refused, and every Zulip leg is in place")
+          "is refused, and every chat leg is in place")
     return 0
 
 

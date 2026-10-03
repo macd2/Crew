@@ -6,14 +6,12 @@ deterministic remedy and a proof. crew_coordinator.py calls `heal_card` first fo
 to decide on; a card healed here is done for that pass, and anything a remedy cannot fix goes on to the
 coordinator's decision turn (there is no second, escalate-once path any more).
 
-  held_workspace  a ready card the respawn guard holds because its workspace is missing or
-                  unwritable (a permission error reads as an auth blocker) -> give it a scratch
-                  dir and lift the hold
   dead_model      a ready card held on a quota/auth error from a model it is still pinned to
                   -> ask the router for a fresh pick, re-pin, lift the hold; if no pick fits the
                   remedy says so (`fixed: False`) and the coordinator decides
   stale_verify    a blocked card whose own proof command now exits 0 -> the block is stale, put
-                  the card back in the queue with the output attached
+                  the card back in the queue with the output attached. Never a card the verifier
+                  blocked (crew_card.verifier_block): its judgement is not the proof's to override
 
 Every remedy takes exactly (card, dry) and returns a result dict with `class`, `card`, `action`
 and `fixed` (True when the card no longer needs a decision).
@@ -30,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_result  # noqa: E402 - the words of the thrash stop's block reason
+import crew_safety  # noqa: E402 - the one runner of a proof command
 KANBAN_DB = os.environ.get("KANBAN_DB") or os.path.expanduser("~/.hermes/kanban.db")
 BLOCKER_WORDS = (r"quota", r"rate", r"429", r"403", r"forbidden", r"billing", r"subscription",
                  r"auth(?!or\b)", r"access denied", r"permission denied", r"invalid api key")
@@ -115,14 +114,8 @@ def q(sql, args=()):
 
 
 def event(card, kind, payload):
-    conn = sqlite3.connect(KANBAN_DB)
-    try:
-        conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
-                     "values (?,?,?,?,?)",
-                     (card, None, kind, json.dumps(payload), int(time.time())))
-        conn.commit()
-    finally:
-        conn.close()
+    import crew_card
+    return crew_card._append_card_event(card, kind, payload, db=KANBAN_DB)
 
 
 def kanban_cli(*args):
@@ -133,17 +126,13 @@ def kanban_cli(*args):
 
 
 def release_block(card):
-    """Lift a block without the CLI, for the run where the CLI call fails.
-
-    `hermes kanban unblock` promotes the card and writes its event; this is the narrow write that only
-    makes the card walkable again, used when that call did not land. Returns True when it wrote.
-    """
-    conn = sqlite3.connect(KANBAN_DB)
+    """Lift a block without the CLI, for the run where the CLI call fails: the kernel's own `unblock_task`
+    (promotion, parent re-gating, the `unblocked` event), called directly instead of through the command.
+    Returns True when the card left `blocked`."""
+    import crew_card
+    kb, conn = crew_card.kb_conn(KANBAN_DB)
     try:
-        cur = conn.execute("update tasks set status = 'ready', block_kind = NULL, "
-                           "last_failure_error = NULL where id = ? and status = 'blocked'", (card,))
-        conn.commit()
-        return cur.rowcount > 0
+        return bool(kb.unblock_task(conn, card))
     finally:
         conn.close()
 
@@ -161,40 +150,11 @@ def is_blocker(text):
     return bool(BLOCKER_RX.search((text or "").lower()))
 
 
-def proof_cmd(body):
-    """One reader for every caller: crew_card owns the rule that the '(none - ...)' template text
-    is a note, not a command. Importing it here is what keeps heal and unstale from drifting."""
+def card_proof(card):
+    """The proof command heal may run for this card: the one it was opened with (crew_card's snapshot), never
+    the body line - heal runs unattended, and the body is text a model wrote and anyone can edit."""
     import crew_card
-    return crew_card.proof_cmd(body)
-
-
-def run_proof(cmd, timeout=240):
-    try:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        out = (p.stdout or "") + (p.stderr or "")
-        return p.returncode, out.strip()
-    except subprocess.TimeoutExpired:
-        return 124, "timed out after %ss" % timeout
-    except Exception as exc:  # noqa: BLE001
-        return 127, str(exc)
-
-
-def heal_held_workspace(card, dry):
-    import crew_card
-    ws = card.get("workspace_path") or ""
-    bad = not ws or not os.path.isdir(ws) or not os.access(ws, os.W_OK)
-    if not bad:
-        return None
-    if dry:
-        return {"class": "held_workspace", "card": card["id"], "action": "would repoint workspace",
-                "fixed": True}
-    res = crew_card.repoint_workspace(card["id"])
-    if not res.get("ok"):
-        return None
-    event(card["id"], "self_heal", {"class": "held_workspace", "to": res.get("workspace"),
-                                    "released": res.get("released"), "ts": time.time()})
-    return {"class": "held_workspace", "card": card["id"],
-            "action": "workspace -> %s, hold lifted" % res.get("workspace"), "fixed": True}
+    return crew_card.close_proof_command(card["id"])
 
 
 def heal_dead_model(card, dry):
@@ -220,20 +180,27 @@ def heal_dead_model(card, dry):
 
 
 def heal_stale_verify(card, dry):
-    cmd = proof_cmd(card.get("body") or "")
+    import crew_card
+    cmd = card_proof(card)
     if not cmd:
         return None
+    if crew_card.verifier_block(card["id"]):
+        return None     # the verifier's judgement stands over a passing proof: the coordinator decides
     if dry:
         return {"class": "stale_verify", "card": card["id"], "action": "would re-run: %s" % cmd[:70],
                 "fixed": False}
-    rc, out = run_proof(cmd)
+    res = crew_safety.run_proof(cmd, None, 240, crew_safety.proof_mode(card["id"], cmd),
+                                 card=card["id"])
+    if res.blocked:     # not a failed proof: the owner is asked (the coordinator reads `blocked`)
+        return {"class": "stale_verify", "card": card["id"], "fixed": False, "blocked": res.blocked,
+                "command": cmd, "action": "proof blocked by Hermes safety: %s" % res.blocked[:120]}
+    rc, out = res.rc, res.out.strip()
     head = " ".join(out.split())[-600:]
     if rc != 0:
         event(card["id"], "self_heal", {"class": "stale_verify", "ran": cmd[:200], "rc": rc,
                                         "verdict": "still failing", "ts": time.time()})
         return {"class": "stale_verify", "card": card["id"], "action": "proof still fails (rc=%d)" % rc,
                 "fixed": False}
-    import crew_card
     lifted = crew_card.lift_block(card["id"])       # the kernel's unblock, plus the block counter reset
     p = type("Lift", (), {"returncode": lifted["rc"]})
     fell_back = False
@@ -270,23 +237,24 @@ def safely(fn, card, dry):
 def heal_card(card, dry=False):
     """The remedies for one card, in order; the first that applies is the answer for it.
 
-    ready + a wall in last_failure_error -> held_workspace, then dead_model (quota/rate walls only)
+    ready + a quota/rate wall in last_failure_error -> dead_model
     blocked + a proof command that now exits 0 -> stale_verify
     Returns the remedy's result dict, or None when no remedy applies to this card in this state.
     """
     status = card.get("status")
+    import crew_card
+    if crew_card.parked_by_owner(KANBAN_DB, card.get("id")):
+        return None             # /crew-stop parked it: it stays down until the owner continues it
     if status == "ready":
         err = card.get("last_failure_error") or ""
         if not is_blocker(err):
             return None
-        if heal_stamp(card["id"], "held_workspace") or heal_stamp(card["id"], "dead_model"):
+        if heal_stamp(card["id"], "dead_model"):
             return None
-        wall = any(w in err.lower() for w in ("quota", "rate", "429", "403"))
-        got = safely(heal_held_workspace, card, dry)
-        if got is None and wall:
-            got = safely(heal_dead_model, card, dry)
-        return got
-    if status == "blocked" and proof_cmd(card.get("body") or ""):
+        if any(w in err.lower() for w in ("quota", "rate", "429", "403")):
+            return safely(heal_dead_model, card, dry)
+        return None
+    if status == "blocked" and card_proof(card):
         if heal_stamp(card["id"], "stale_verify"):
             return None
         return safely(heal_stale_verify, card, dry)

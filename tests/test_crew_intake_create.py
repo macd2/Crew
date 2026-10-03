@@ -13,6 +13,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -233,5 +234,153 @@ class ExpandedAskTests(unittest.TestCase):
         self.assertEqual("make it fast", plug._CREW_BRIEFS["SX"])
 
 
+class IntakeFactsTests(unittest.TestCase):
+    """The intake gets crew's own values in the turn, so it never digs through crew's files for them."""
+
+    def setUp(self):
+        os.environ.setdefault("HERMES_HOME", tempfile.mkdtemp(prefix="crew-intake-test-"))
+        self.plug = load_plugin()
+
+    def test_an_expanded_skill_turn_gets_the_facts(self):
+        out = self.plug.crew_intake_preload(
+            user_message='[IMPORTANT: The user has invoked the "crew" skill] ask', session_id="SF", turn_id="T")
+        facts = (out or {}).get("context", "")
+        self.assertIn("<crew-facts>", facts)
+        self.assertIn("worker %d" % crew_card.default_budget("worker"), facts)
+        self.assertRegex(facts, r"Proof safety mode: (safe|brave)\.")
+        self.assertNotIn("<skill", facts)     # the gateway already expanded the skill: facts only
+
+    def test_a_raw_slash_turn_gets_skill_and_facts(self):
+        ctx = self.plug.crew_intake_preload(user_message="/crew make it fast", session_id="SG", turn_id="T")["context"]
+        self.assertIn('<skill name="crew">', ctx)
+        self.assertIn("<crew-facts>", ctx)
+
+    def test_no_card_tool_means_no_facts_and_no_error(self):
+        with unittest.mock.patch.object(self.plug, "_card_tool", return_value=None):
+            self.assertIsNone(self.plug.crew_intake_preload(
+                user_message='[IMPORTANT: The user has invoked the "crew" skill] ask', session_id="SH", turn_id="T"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+COMPLEX_BODY = """Role: content
+Budget: 500000
+Route: none
+GOAL: Ship a three-page site for the bakery
+Artifact: a static site (index, menu, contact)
+Lands at: /srv/bakery
+For: walk-in customers
+Constraints: no JavaScript frameworks
+Inputs: /home/owner/bakery/brand.md, https://example.com/menu-draft
+> Tone: warm, short sentences.
+> Opening hours: Tue-Sat 7-15.
+Done when: each of the three pages exists, links to the other two and shows the opening hours
+proof command: python3 /srv/bakery/.crew/verify.py
+"""
+
+
+class InputsAndScriptProofTests(IntakeCase):
+    """The intake contract for a realistic complex ask, end to end through the plugin guard (no model)."""
+
+    def test_a_complex_ask_renders_independent_with_inputs_and_a_script_proof(self):
+        self.open_intake(ask="build the bakery site")
+        res = self.guard(body=COMPLEX_BODY, assignee="crew-content")
+        self.assertEqual("modify", res["action"])
+        body = res["args"]["body"]
+        c = crew_card.parse_contract(body)
+        self.assertEqual("independent", crew_card.verify_mode(body))      # the intake wrote no Verify line: script proof
+        self.assertIn("Verify: independent", body)
+        self.assertEqual("python3 /srv/bakery/.crew/verify.py", c["proof_cmd"])
+        self.assertEqual("/home/owner/bakery/brand.md, https://example.com/menu-draft\n"
+                         "> Tone: warm, short sentences.\n> Opening hours: Tue-Sat 7-15.", c["inputs"])
+        self.assertEqual(1, body.count("> Tone: warm"))                   # not repeated as an intake note
+        self.assertNotIn("Intake notes", body)
+        self.assertEqual(crew_card.role_profile("content"), res["args"]["assignee"])
+
+    def test_a_script_proof_stated_as_proof_is_coerced_and_a_command_only_proof_is_not(self):
+        self.open_intake()
+        coerced = self.guard(body=COMPLEX_BODY + "Verify: proof\n", assignee="crew-content")["args"]["body"]
+        self.assertEqual("independent", crew_card.verify_mode(coerced))
+        plain = self.guard(body=BODY + "Verify: proof\n")["args"]["body"]
+        self.assertEqual("proof", crew_card.verify_mode(plain))
+        self.assertEqual("proof", crew_card.verify_mode(self.guard()["args"]["body"]))
+
+    def test_inputs_round_trip_and_an_empty_field_leaves_no_line(self):
+        c = crew_card.parse_contract(BODY)
+        self.assertEqual("", c["inputs"])
+        self.assertNotIn("Inputs", crew_card.render_body(crew_card.prepare_contract(dict(c, coordinator="p/s"))))
+        c = crew_card.parse_contract(COMPLEX_BODY)
+        back = crew_card.parse_contract(crew_card.render_body(crew_card.prepare_contract(dict(c, coordinator="p/s"))))
+        self.assertEqual(c["inputs"], back["inputs"])
+        only_quote = crew_card.parse_contract(BODY + "Inputs:\n> pasted spec line\n")
+        self.assertEqual("> pasted spec line", only_quote["inputs"])
+
+    def test_pasted_text_over_the_limit_is_refused_with_the_file_path_advice(self):
+        self.open_intake()
+        res = self.guard(body=BODY + "Inputs: x\n> " + "y" * 2100 + "\n")
+        self.assertEqual("block", res["action"])
+        self.assertIn("file path", res["message"])
+
+    def test_inputs_reach_a_coordinator_split_child_and_an_audit_follow_up(self):
+        import crew_coordinator as cc
+        c = crew_card.parse_contract(COMPLEX_BODY)
+        child = cc.split_child({"title": "a", "goal": "g"}, "o", "p/s", crew_card.contract_inputs(COMPLEX_BODY))
+        self.assertEqual(c["inputs"], child["inputs"])
+        rendered = crew_card.render_body(crew_card.prepare_contract(dict(c, coordinator="p/s")))
+        self.assertEqual(c["inputs"], crew_card.parse_contract(rendered)["inputs"])   # open_audit_followup's path
+
+
+class IntakeWindowTests(IntakeCase):
+    def test_an_owner_turn_in_a_live_intake_extends_the_window(self):
+        self.open_intake()
+        self.plug._CREW_WINDOWS["S1"] = self.plug.time.time() + 5          # nearly expired
+        self.plug.crew_intake_preload(user_message="what would the menu page look like?", session_id="S1", turn_id="T2")
+        self.assertGreater(self.plug._CREW_WINDOWS["S1"], self.plug.time.time() + self.plug.INTAKE_WINDOW_SECONDS - 60)
+        self.assertEqual("modify", self.guard(turn="T3")["action"])
+
+    def test_an_expired_window_is_not_reopened_by_an_ordinary_message(self):
+        self.open_intake()
+        self.plug._CREW_WINDOWS["S1"] = self.plug.time.time() - 1
+        self.plug.crew_intake_preload(user_message="go", session_id="S1", turn_id="T2")
+        self.assertEqual("block", self.guard(turn="T3")["action"])
+
+    def test_a_session_with_no_intake_never_gets_a_window_from_chatter(self):
+        self.plug.crew_intake_preload(user_message="hello", session_id="S7", turn_id="T1")
+        self.assertEqual("block", self.guard(session="S7")["action"])
+
+
+# The real shape Hermes delivers when the intake's `crew_card.py watch` background process ends
+# (state.db, session 20261003_132900_ed8407, 2026-10-03).
+WATCH_REPORT = ('[IMPORTANT: Background process proc_376681626e77 completed normally (exit code 0).\n'
+                'Command: python3 "$HERMES_HOME/plugins/crew/scripts/crew_card.py" watch --card t_3f619c1d\n'
+                'Output:\ncrew watch: card t_3f619c1d was stopped (archived); nothing more to report.\n]')
+OTHER_COMPLETION = ('[IMPORTANT: Background process proc_1 completed normally (exit code 0).\n'
+                    'Command: python3 build.py --card t_3f619c1d\nOutput:\ndone\n]')
+
+
+class AnsweringReportTests(IntakeCase):
+    def test_report_then_owner_reply_opens_a_card_once_with_skill_injected(self):
+        self.assertIsNone(self.plug.crew_intake_preload(user_message=WATCH_REPORT, session_id="S1", turn_id="T1"))
+        self.assertEqual("block", self.guard(turn="T1")["action"])          # the report turn itself opens nothing
+        out = self.plug.crew_intake_preload(user_message="do it again", session_id="S1", turn_id="T2")
+        self.assertIn("t_3f619c1d", out["context"])
+        self.assertIn('<skill name="crew">', out["context"])
+        self.assertEqual("modify", self.guard(turn="T2")["action"])         # the real guard allows the create
+        self.assertIsNone(self.plug.crew_intake_preload(user_message="and more", session_id="S1", turn_id="T3"))   # injected once
+
+    def test_other_session_and_non_watcher_completion_and_expiry_open_nothing(self):
+        self.plug.crew_intake_preload(user_message=WATCH_REPORT, session_id="S1", turn_id="T1")
+        self.assertIsNone(self.plug.crew_intake_preload(user_message="redo it", session_id="S2", turn_id="T2"))
+        self.assertEqual("block", self.guard(session="S2", turn="T2")["action"])
+        self.plug.crew_intake_preload(user_message=OTHER_COMPLETION, session_id="S3", turn_id="T1")
+        self.assertIsNone(self.plug.crew_intake_preload(user_message="redo it", session_id="S3", turn_id="T2"))
+        self.assertEqual("block", self.guard(session="S3", turn="T2")["action"])
+        self.plug._REPORT_WINDOWS["S1"] = ("t_3f619c1d", self.plug.time.time() - 1)
+        self.assertIsNone(self.plug.crew_intake_preload(user_message="redo it", session_id="S1", turn_id="T3"))
+        self.assertEqual("block", self.guard(session="S1", turn="T3")["action"])
+
+    def test_no_session_report_opens_nothing(self):
+        self.plug.crew_intake_preload(user_message=WATCH_REPORT, session_id=None, turn_id="T1")
+        self.assertEqual({}, self.plug._REPORT_WINDOWS)

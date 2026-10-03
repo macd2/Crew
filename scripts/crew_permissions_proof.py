@@ -3,8 +3,9 @@
 
 Why this exists: the runtime fires a shell hook only when its (event, command) pair sits in that
 home's shell-hooks-allowlist.json. Without the entry it logs "not allowlisted - skipped" and the gate
-simply never runs - the home still looks installed, and nothing goes red. This proof pins both
-directions of the rule the installer now owns.
+simply never runs - the home still looks installed, and nothing goes red. The installer does not
+approve hooks (consent is Hermes's own prompt); it reads the allowlist and reports what is missing.
+This proof pins that report, and that the installer never writes the allowlist.
 
 The three checks mirror the runtime's own doctor (hermes_cli/hooks.py `_doctor_one`: exec bit,
 allowlist entry, mtime drift), so a home this proof calls healthy is a home `hermes hooks doctor`
@@ -12,8 +13,10 @@ calls healthy.
 
 Checks:
   1-7  permission_problems, one fixture per failure it must catch and one that must stay green
-  8-9  _approve: the entry it writes is the one the gate accepts, and a second call changes nothing
-  10   step_permissions: dry run reports the fault, apply fixes it, the gate then reads green
+  8    an allowlist entry in the runtime's own shape passes the gate
+  9    the installer has no approval writer at all
+  10   step_permissions reports the fault with Hermes's own approval command, in --check and in apply,
+       and never writes the allowlist
   11   the live crew homes: every declared hook approved, role settings in place
   12   install.py --check runs the gate (the step is wired into the installer)
 """
@@ -48,6 +51,19 @@ def check(name, ok, detail=""):
     return ok
 
 
+def write_approval(home, event, script):
+    """What Hermes itself records when the owner confirms a hook (agent/shell_hooks.py): the fixture's stand-in
+    for the owner's consent. The installer has no such writer."""
+    path = os.path.join(home, CI.ALLOWLIST_NAME)
+    data = json.load(open(path)) if os.path.exists(path) else {"approvals": []}
+    data["approvals"] = [e for e in data["approvals"] if (e["event"], e["command"]) != (event, script)]
+    data["approvals"].append({"event": event, "command": script, "approved_at": CI._iso(time.time()),
+                              "script_mtime_at_approval": CI._mtime_iso(script)})
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+    os.chmod(path, 0o600)
+
+
 def fixture(root, name, pairs, approve=True, mode=0o600, drift=False, executable=True, missing=False):
     """A home with config.yaml declaring `pairs`, and the hook scripts those pairs name."""
     home = os.path.join(root, name)
@@ -70,7 +86,7 @@ def fixture(root, name, pairs, approve=True, mode=0o600, drift=False, executable
             os.utime(script, (old, old))
     if approve:
         for event, script in pairs:
-            CI._approve(home, event, script)
+            write_approval(home, event, script)
         if drift:                      # the script changed after it was approved
             for _event, script in pairs:
                 os.utime(script, None)
@@ -96,7 +112,7 @@ def main():
         b_home = os.path.join(root, "partial")
         b = fixture(root, "partial", [("pre_tool_call", os.path.join(b_home, "hooks", "one.py"))],
                     approve=False)
-        CI._approve(b, "post_tool_call", os.path.join(b_home, "hooks", "one.py"))
+        write_approval(b, "post_tool_call", os.path.join(b_home, "hooks", "one.py"))
         f = CI.permission_problems(b)
         check("a declared hook that is not approved is red",
               any("declared but not approved" in x and "pre_tool_call" in x for x in f), f)
@@ -131,45 +147,37 @@ def main():
         f = CI.permission_problems(h)
         check("a hook script that is missing is red", any("missing" in x for x in f), f)
 
-        # 8: what the step writes is what the gate accepts
+        # 8: an entry in the runtime's shape passes the gate
         i_home = os.path.join(root, "written")
         i = fixture(root, "written", [("pre_tool_call", os.path.join(i_home, "hooks", "one.py"))],
                     approve=False)
-        word = CI._approve(i, "pre_tool_call", os.path.join(i_home, "hooks", "one.py"))
+        write_approval(i, "pre_tool_call", os.path.join(i_home, "hooks", "one.py"))
         entry = json.load(open(os.path.join(i, CI.ALLOWLIST_NAME)))["approvals"][0]
-        check("_approve writes the runtime's own entry shape",
-              word == "approved" and sorted(entry) == ["approved_at", "command", "event",
-                                                       "script_mtime_at_approval"],
-              "%s %s" % (word, sorted(entry)))
-        check("_approve sets mode 0600",
-              (os.stat(os.path.join(i, CI.ALLOWLIST_NAME)).st_mode & 0o777) == 0o600)
-        check("the record _approve wrote passes the gate", CI.permission_problems(i) == [],
+        check("an entry in the runtime's own shape passes the gate",
+              CI.permission_problems(i) == [] and sorted(entry) == ["approved_at", "command", "event",
+                                                                    "script_mtime_at_approval"],
               CI.permission_problems(i))
 
-        # 9: a second approval for the same pair is a no-op
-        before = open(os.path.join(i, CI.ALLOWLIST_NAME), "rb").read()
-        again = CI._approve(i, "pre_tool_call", os.path.join(i_home, "hooks", "one.py"))
-        check("_approve is idempotent (no rewrite, no churn)",
-              again == "" and open(os.path.join(i, CI.ALLOWLIST_NAME), "rb").read() == before, again)
+        # 9: the installer cannot approve
+        check("install.py has no approval writer and sets no HERMES_ACCEPT_HOOKS",
+              not hasattr(CI, "_approve") and "HERMES_ACCEPT_HOOKS" not in open(INSTALL).read())
 
-        # 10: the step reports the fault and fixes it
+        # 10: the step reports, with Hermes's own flow, and writes nothing
         j_home = os.path.join(root, "stepped")
         j = fixture(root, "stepped", [("pre_tool_call", os.path.join(j_home, "hooks", "one.py"))],
                     approve=False)
         real_plans = CI._role_plans
-        # role "" on purpose: this fixture has no role settings.conf applied, and the point here is
-        # the hook-consent half of the step
-        CI._role_plans = lambda prefix: [("", "stepped", j, "")]
+        CI._role_plans = lambda prefix: []
         try:
-            status, detail = CI.step_permissions(j, "x-", False)
-            check("step_permissions --check reports the fault without writing",
-                  status == "CHANGED" and not os.path.exists(os.path.join(j, CI.ALLOWLIST_NAME)), detail)
-            status, detail = CI.step_permissions(j, "x-", True)
-            check("step_permissions approves it and the gate reads green",
-                  status == "CHANGED" and CI.permission_problems(j) == [], detail)
-            status, detail = CI.step_permissions(j, "x-", False)
-            check("a healthy home reports OK (idempotent install)",
-                  status == "OK" or "worker: crew.role" in detail, detail)
+            for apply in (False, True):
+                status, detail = CI.step_permissions(j, "stepped", "x-", apply)
+                check("step_permissions (apply=%s) is FAILED, names `hermes ... chat`, writes nothing" % apply,
+                      status == "FAILED" and "hermes -p stepped chat" in detail
+                      and "hooks doctor" in detail and not os.path.exists(os.path.join(j, CI.ALLOWLIST_NAME)),
+                      detail)
+            write_approval(j, "pre_tool_call", os.path.join(j_home, "hooks", "one.py"))
+            status, detail = CI.step_permissions(j, "stepped", "x-", False)
+            check("once the owner approved it the step reads OK", status == "OK", detail)
         finally:
             CI._role_plans = real_plans
 
@@ -183,7 +191,7 @@ def main():
                 bad_hooks[os.path.basename(home)] = problems
             if role:
                 tpl = os.path.join(str(CI.SRC_DIR), "templates", "profiles", role)
-                settings = CI.settings_problems(home, role, tpl)
+                settings = CI.settings_problems(os.path.basename(home), role, tpl)
                 if settings:
                     bad_settings[os.path.basename(home)] = settings
         check("every live crew home has all its declared hooks approved", not bad_hooks, bad_hooks)
@@ -196,7 +204,9 @@ def main():
         # 12: the installer runs the gate
         args = type("Args", (), {"profile_prefix": "crew-", "no_service": True, "no_cron": True,
                                  "no_profiles": True, "graph_port": CI.GRAPH_PORT,
-                                 "https_port": 8445})()
+                                 "https_port": 8445, "spill_cap": False, "chat_kanban": False,
+                                 "telegram_menu": False, "nightly_proofs": False,
+                                 "proofs_deliver": CI.CRON_PROOFS_DELIVER})()
         steps = [name for name, _fn in CI._steps(CI.resolve_profile_home(crew_card.owner_profile()),
                                                  crew_card.owner_profile(), args)]
         check("install.py wires the permissions step into its step list", "permissions" in steps, steps)

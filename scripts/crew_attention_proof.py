@@ -15,7 +15,7 @@ served source are checked):
                 seconds since the card entered that state; entered_ts = the state the row was in
                 when it was shown, which is what a clear is scoped to; ack_url = "/ack/<id>".
   /ack/<id>     one click clears ONE row, 200 on success; the row leaves the list on the next fetch
-                and stays off after a reload. /ack/<id>?undo=1 puts it back.
+                and stays off after a reload. /ack/<id>?undo=1 puts it back. Writes are POST with a same-origin Origin header.
   /ack/all      clear every notification at once - the waiting cards and EVERY done card, not only the
                 rows one screen shows; /ack/all?undo=1 restores them. Both are scoped the same way: a
                 cleared done card stays cleared, a cleared waiting card returns when that card moves on.
@@ -62,7 +62,10 @@ def check(name, ok, detail=""):
 
 
 def fetch(path):
-    req = urllib.request.Request(URL + path, method="GET")
+    # /ack/* is a write: POST only, from the board's own origin (what the page's fetch sends)
+    write = path.startswith("/ack/")
+    req = urllib.request.Request(URL + path, method="POST" if write else "GET",
+                                 headers={"Origin": URL} if write else {})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -278,7 +281,7 @@ def browser_leg():
     port = int(os.environ.get("CREW_PROOF_CDP_PORT", "9431"))
     profile_dir = os.path.join(tempfile.gettempdir(), "crew-attention-chrome")
     chrome_log = tempfile.mkdtemp(prefix="crew-attention-browser-")
-    proc = subprocess.Popen([chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+    proc = subprocess.Popen([chrome, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox",
                              "--remote-debugging-port=%d" % port, "--window-size=1400,900",
                              "--user-data-dir=" + profile_dir, URL + "/"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

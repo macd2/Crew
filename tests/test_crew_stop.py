@@ -33,13 +33,21 @@ class NoLiveBoardTests(unittest.TestCase):
 class StopTargetTests(unittest.TestCase):
     """stop_targets: the named card, or every card that is not done/archived."""
 
-    CARDS = [{"id": "t_a", "status": "running"}, {"id": "t_b", "status": "blocked"},
-             {"id": "t_c", "status": "done"}, {"id": "t_d", "status": "archived"},
-             {"id": "t_e", "status": "triage"}, {"id": "t_f", "status": "review"}]
+    CREW = "Role: writer\nGOAL: x"
+    CARDS = [{"id": "t_a", "status": "running", "body": CREW}, {"id": "t_b", "status": "blocked", "body": CREW},
+             {"id": "t_c", "status": "done", "body": CREW}, {"id": "t_d", "status": "archived", "body": CREW},
+             {"id": "t_e", "status": "triage", "body": CREW}, {"id": "t_f", "status": "review", "body": CREW},
+             {"id": "t_x", "status": "running", "body": "someone else's card"},
+             {"id": "t_y", "status": "blocked", "body": None}]
 
     def test_no_argument_stops_every_open_card(self):
         self.assertEqual(["t_a", "t_b", "t_e", "t_f"],
                          [c["id"] for c in crew_stop.stop_targets(self.CARDS)])
+
+    def test_the_all_form_never_takes_a_non_crew_card(self):
+        ids = [c["id"] for c in crew_stop.stop_targets(self.CARDS)]
+        self.assertNotIn("t_x", ids)
+        self.assertNotIn("t_y", ids)
 
     def test_a_named_card_is_the_only_target(self):
         self.assertEqual(["t_b"], [c["id"] for c in crew_stop.stop_targets(self.CARDS, "t_b")])

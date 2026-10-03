@@ -27,7 +27,6 @@ if HERE not in sys.path:
 import crew_card  # noqa: E402 - reads env on each call, so a top-level import is safe
 import crew_proof_board  # noqa: E402
 KANBAN_DB = crew_proof_board.proof_db()
-FEED = os.path.join(HERE, "kanban_zulip_feed.py")
 ROOT = "t" + "9or" + "igin_root"
 CHILD = "t" + "9or" + "igin_child"
 GRAND = "t" + "9or" + "igin_grand"
@@ -98,13 +97,6 @@ def drop():
         conn.close()
 
 
-def feed_module():
-    spec = importlib.util.spec_from_file_location("kanban_zulip_feed", FEED)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def main():
     import crew_card
 
@@ -128,16 +120,12 @@ def main():
           not sfound.get("origin") and sfound.get("session") == SESSION,
           "session=%s origin=%r" % (sfound.get("session"), sfound.get("origin")))
 
-    feed = feed_module()
-    r_origin, r_session, r_src = feed.resolved_origin(GRAND, "")
+    import crew_notify
+    r_origin, r_src = crew_notify.resolved_origin(KANBAN_DB, GRAND)
     check("the notifier resolves the same inherited origin",
           r_origin == ORIGIN, "origin=%s from=%s" % (r_origin, r_src))
-    text = feed._ending_text(sqlite3.connect("file:%s?mode=ro" % KANBAN_DB, uri=True),
-                             {"id": SOLO, "title": "probe", "assignee": "crew-worker",
-                              "last_failure_error": ""}, "blocked", session=SESSION,
-                             inherited_from="")
-    check("the alert names the opening session when there is no chat",
-          "Opened by session: `%s`" % SESSION in text, [l for l in text.splitlines() if "session" in l][:1])
+    check("a chat-less session has no send target", not crew_notify.send_target(
+        crew_notify.resolved_origin(KANBAN_DB, SOLO)[0]))
 
     conn = sqlite3.connect("file:%s?mode=ro" % KANBAN_DB, uri=True)
     try:
@@ -153,10 +141,6 @@ def main():
     check("a stale hold can be lifted", released and bool(before) and after is None,
           "before=%r after=%r" % ((before or "")[:30], after))
 
-    res = crew_card.repoint_workspace(HELD)
-    ok_ws = bool(res.get("ok")) and os.path.isdir(res.get("workspace") or "") \
-        and os.access(res.get("workspace") or "", os.W_OK)
-    check("a card with a broken workspace gets a writable one", ok_ws, json.dumps(res)[:70])
     drop()
     if FAILS:
         print("PROOF FAIL: %d check(s) failed: %s" % (len(FAILS), ", ".join(FAILS)))

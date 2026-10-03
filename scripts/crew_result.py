@@ -78,7 +78,7 @@ def result_out(obj, limit=160):
     A failure's reason wins; otherwise the tool's own output - terminals carry it under 'output', other
     tools under content/text/message/result. A result that carries no such key is summarised from its
     own shape: the first list it holds (a search's matches, a listing's items) or its scalars
-    ("2 matches: .../kanban_zulip_feed.py:551"), so a step never reads as having printed nothing. The
+    ("2 matches: .../crew_card.py:551"), so a step never reads as having printed nothing. The
     LAST non-empty line is the tail of the run, which is what went wrong or last happened.
     """
     if not isinstance(obj, dict):

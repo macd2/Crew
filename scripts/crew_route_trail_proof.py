@@ -113,7 +113,7 @@ PANEL_JS = r"""
 def render(base, cdp, graph):
     profile = tempfile.mkdtemp(prefix="crew-route-trail-")
     url = "%s/card/%s#node=card:%s&tab=route" % (base, CARD, CARD)
-    proc = subprocess.Popen([CHROME, "--headless=new", "--disable-gpu", "--no-sandbox",
+    proc = subprocess.Popen([CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox",
                              "--remote-debugging-port=%d" % cdp, "--user-data-dir=" + profile,
                              "--window-size=1600,1000", url],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

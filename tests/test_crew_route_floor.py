@@ -78,11 +78,15 @@ class FloorCase(unittest.TestCase):
         conn.close()
 
     def cli_stub(self, args, timeout=120):
-        """The kernel verbs the wall path calls; set-model <id> clears BOTH columns, as the kernel does."""
+        """The kernel verbs the crew calls: `set-model <id>` clears BOTH columns, `set-model <id> <model>
+        [--provider P]` pins them, as the kernel's set_model_override does."""
         self.cli.append(list(args))
-        if args[0] == "set-model" and len(args) == 2:
+        if args[0] == "set-model":
+            model = args[2] if len(args) > 2 else None
+            provider = args[args.index("--provider") + 1] if "--provider" in args else None
             conn = sqlite3.connect(self.db)
-            conn.execute("update tasks set model_override = null, provider_override = null where id = ?", (args[1],))
+            conn.execute("update tasks set model_override = ?, provider_override = ? where id = ?",
+                         (model, provider, args[1]))
             conn.commit()
             conn.close()
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
@@ -118,7 +122,10 @@ class PickTests(FloorCase):
         pick = crew_card.pick_from_answer(PICK_ANSWER, "code", "publish branch")
         self.assertEqual(("gemini", "gemini-3.6-flash"), (pick["provider"], pick["model"]))
         self.seed(model=None, provider=None)
-        self.assertTrue(crew_card.apply_route(CARD, pick))
+        with mock.patch.object(crew_card, "_kanban", self.cli_stub):
+            self.assertTrue(crew_card.apply_route(CARD, pick))
+        self.assertEqual([["set-model", CARD, "gemini-3.6-flash", "--provider", "gemini"]], self.cli,
+                         "the pin is the kernel's own set-model, not a column write")
         self.assertEqual(("gemini-3.6-flash", "gemini"), self.row()[:2])
         ev = self.events("route")[0]
         self.assertEqual(FLOOR, ev["floor"])

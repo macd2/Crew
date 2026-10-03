@@ -7,7 +7,7 @@ check is printed. Read-only: it fetches the live page and reads the kanban board
 Checks, default page /:
   1. the header carries the board's facts: the LIVE badge, "crew board", the card count, "N working now" /
      "nothing running", and the running / blocked / done counts, each a number then its word
-  2. no archived card id is listed
+  2. no archived card id is listed in a live lane (they sit only in the collapsed Archived column)
   3. no card whose title carries the test marker (/\\btests?\\b|probe|dry-run proof/i) is listed
   4. a "Needs you" heading exists and every blocked card id is listed before the first non-blocked one
   4b. the header's "N working now" equals the runs that can still be alive (worker pid answering, or a
@@ -16,7 +16,7 @@ Checks, default page /:
 Checks, /?all=1:
   5. archived ids and test-marked titles are reachable there
 Phase 2 of the UI spec (docs/crew/ui-spec/spec.md section 8):
-  6. board.json: five lanes in the fixed order, every rendered tile has summary + verdict (+ budget only with a
+  6. board.json: five lanes in the fixed order plus the Archived column, every rendered tile has summary + verdict (+ budget only with a
      ceiling) - on the proofs board and on the live board
   7. an empty board still draws all five lanes, empty, in order, and the header reads 0 for each count
   8. live anchors: t_d93e0c7b reason + 3 runs + budget >= 100%, t_98550764 PASS, t_f513fc0f FAIL
@@ -145,7 +145,7 @@ def test_cards_out_of_the_numbers():
     return 0
 
 
-LANE_ORDER = ["blocked", "running", "review", "queued", "done"]
+LANE_ORDER = ["blocked", "running", "review", "queued", "done", "archived"]   # archived: the owner-collapsed last column
 HEADER_WORDS = ("running", "blocked", "done")
 # Phase-2 anchors (ui-spec section 8), read from the LIVE board in-process (read-only): the card, what its tile
 # must carry.
@@ -169,7 +169,7 @@ def board_contract(data, where):
     """The board.json contract every board must keep: five lanes in the fixed order, every rendered tile
     enriched (summary, verdict; budget only with a ceiling)."""
     keys = [lane.get("key") for lane in data.get("lanes") or []]
-    if keys[:5] != LANE_ORDER:
+    if [k for k in keys if k != "other"] != LANE_ORDER or keys[-1] != "archived":
         return "%s: lanes are %s, not the fixed order %s" % (where, keys, LANE_ORDER)
     for lane in data["lanes"]:
         for t in lane.get("tiles") or []:
@@ -293,7 +293,9 @@ def main():
         return fail("the board says %s working now, the runs say %s (%s run row(s) read; a dead worker "
                     "leaves status='running' behind)" % (got_live, exp_live, run_rows))
 
-    listed_archived = [r["id"] for r in archived if r["id"] in page]
+    # archived cards live only in the last, collapsed 'archived' lane - never in a live lane
+    live_ids = {t["id"] for lane in board_data()["lanes"] if lane["key"] != "archived" for t in lane["tiles"]}
+    listed_archived = [r["id"] for r in archived if r["id"] in live_ids]
     if listed_archived:
         return fail("archived card(s) still listed: %s" % ", ".join(listed_archived[:5]))
 

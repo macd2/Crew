@@ -125,7 +125,7 @@ class RunnerTest(BoardCase):
         pinned = crew_proofs.child_env("crew_brief_proof.py")
         self.assertEqual(pinned["KANBAN_DB"], pb.proofs_db())
         os.environ["KANBAN_DB"] = "/somewhere/else.db"
-        self.assertEqual(crew_proofs.child_env("crew_notify_proof.py")["KANBAN_DB"], "/somewhere/else.db")
+        self.assertEqual(crew_proofs.child_env("crew_graph_flow_check.py")["KANBAN_DB"], "/somewhere/else.db")
 
     def test_a_proof_on_the_live_board_is_never_picked_without_its_hold_being_lifted(self):
         held = set(crew_proofs.LIVE) | set(crew_proofs.NEEDS_ARGS)

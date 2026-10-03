@@ -1,0 +1,27 @@
+{
+ "what": "crew role faces: 10 variants of one avatar; each role is given one on first use",
+ "files": [
+  "blobs-01.svg",
+  "blobs-02.svg",
+  "blobs-03.svg",
+  "blobs-04.svg",
+  "blobs-05.svg",
+  "blobs-06.svg",
+  "blobs-07.svg",
+  "blobs-08.svg",
+  "blobs-09.svg",
+  "blobs-10.svg"
+ ],
+ "source": {
+  "style": "Blobs",
+  "options": "default",
+  "creator": "DiceBear",
+  "url": "https://www.dicebear.com",
+  "seed": "tq58bv38",
+  "license": {
+   "name": "CC0 1.0",
+   "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+ },
+ "made_by": "dev/make_avatars.py (per face: layer rotation/scale/offset from a seeded random sequence, ground colour, id suffix; shapes and opacities unchanged)"
+}

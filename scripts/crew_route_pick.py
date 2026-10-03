@@ -37,10 +37,19 @@ def plugin_dir():
 
 
 def load_plugin():
+    """Import the router plugin's __init__.py and return it as a module.
+
+    TRUST: this EXECUTES the router plugin's code in this process, with exactly the trust the plugins
+    directory already has (Hermes itself imports that same file when it loads the plugin). The pick logic
+    (_live_menu, _decide, _task_class, ...) lives in that __init__.py - the plugin has no side-effect-free
+    submodule to import instead (checked: free-first-router ships engine/ + agent_floor.py, the pick rules
+    are in __init__.py). The path comes from crew_card.router_plugin_path() only (CREW_ROUTER_PLUGIN, this
+    profile, the owner profile), never from a card or a chat. It is loaded under a crew-prefixed module name
+    so it can neither shadow nor be shadowed by a module of the same name."""
     d = plugin_dir()
     if not d:
         return None
-    spec = importlib.util.spec_from_file_location("free_first_router_pick",
+    spec = importlib.util.spec_from_file_location("crew_route_pick__free_first_router",
                                                   os.path.join(d, "__init__.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

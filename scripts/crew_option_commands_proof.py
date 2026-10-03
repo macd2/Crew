@@ -36,7 +36,7 @@ PLUGIN = os.path.join(PROFILE, "plugins", "crew", "__init__.py")
 # set; the proof does the same, or it would run whatever crew copy the base home holds.
 os.environ.setdefault("HERMES_HOME", PROFILE)
 MANIFEST = os.path.join(PROFILE, "plugins", "crew", "plugin.yaml")
-OPTIONS = ["status", "graph", "stop"]
+OPTIONS = ["status", "graph", "stop", "unstuck", "safety"]
 # The commands the owner surface no longer has. None may be registered, and the usage text names none.
 REMOVED = ["crew-run", "crew-verify", "crew-roles", "crew-install", "crew-ops", "crew-unblock", "crew-unstale",
            "crew-heal", "crew-triage"]
@@ -147,20 +147,23 @@ def main():
         arg = mode
         tmp = None
         if "--html" in mode:
-            import tempfile
-            tmp = tempfile.mkdtemp(prefix="crew-graph-proof-")
-            arg = "%s %s" % (mode, os.path.join(tmp, "card.graph.html"))
+            # --html takes a bare file name; the file lands in the profile's scratch dir
+            tmp = os.path.join(mod.HOME, "cache", "scratch")
+            arg = "%s %s" % (mode, "crew-proof-card.graph.html")
         try:
             text = str(host.commands[rows["graph"]]["handler"](arg) or "")
         except Exception as exc:  # noqa: BLE001
             check("/crew-graph %s answers" % mode, False, "%s: %s" % (type(exc).__name__, exc))
             continue
         head = text.strip().splitlines()[0][:70] if text.strip() else ""
-        wrote = (not tmp) or os.path.exists(os.path.join(tmp, "card.graph.html"))
+        wrote = (not tmp) or os.path.exists(os.path.join(tmp, "crew-proof-card.graph.html"))
         check("/crew-graph %s answers" % mode, bool(text.strip()) and wrote, head)
         if tmp:
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
+            for ext in (".html", ".json"):
+                try:
+                    os.remove(os.path.join(tmp, "crew-proof-card.graph" + ext))
+                except OSError:
+                    pass
 
     # 4 - /crew-status is the crew cards in flight of the board it reads
     try:

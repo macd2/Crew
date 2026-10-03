@@ -60,7 +60,7 @@ def main():
     url = "http://%s/card/%s" % (args.host, args.card)
     profile = tempfile.mkdtemp(prefix="crew-click-")
     proc = subprocess.Popen(
-        [CHROME, "--headless=new", "--disable-gpu", "--no-sandbox",
+        [CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox",
          "--remote-debugging-port=%d" % PORT, "--user-data-dir=" + profile,
          "--window-size=1400,760", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

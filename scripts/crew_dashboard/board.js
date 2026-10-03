@@ -11,11 +11,12 @@ var LAST = null, STALE_SINCE = null;
 function store(k, v){ try{ if(v===undefined) return sessionStorage.getItem("crew."+k);
   if(v===null) sessionStorage.removeItem("crew."+k); else sessionStorage.setItem("crew."+k, v); }catch(e){ return null; } }
 function shortId(id){ return String(id).replace(/^t_/,"").slice(0,6); }
-function avatar(name, hue){ return '<span class="avatar" style="--hue:'+(hue||"var(--crew-text-3)")+'">'+
-  esc((name||"?").slice(0,1).toUpperCase())+'</span>'; }
+function avatar(name, hue){
+  if(name) return '<img class="avatar face" src="'+esc(faceUrl(name))+'" alt="'+esc(name)+'" title="'+esc(name)+'">';
+  return '<span class="avatar" style="--hue:'+esc(hue||"var(--crew-text-3)")+'">?</span>'; }
 function hhmm(d){ function p(x){ return (x<10?"0":"")+x; } return p(d.getHours())+":"+p(d.getMinutes()); }
 
-function ahead(att){ return 'needs you - <b>'+(att.stuck||0)+'</b> stuck - <b>'+(att.done||0)+'</b> done'; }
+function ahead(att){ return 'needs you - <b>'+(+att.stuck||0)+'</b> stuck - <b>'+(+att.done||0)+'</b> done'; }
 function drawNotes(att){
   var bell=document.getElementById("bell"), n=document.getElementById("belln");
   var list=document.getElementById("noterows");
@@ -33,9 +34,9 @@ function drawNotes(att){
     var d=document.createElement("div"); d.className="ar"+(stuck?" stuck":"");
     d.innerHTML='<span class="st">'+esc(r.status)+'</span>'+
       '<a class="t" href="/card/'+esc(r.id)+'">'+esc(r.id)+' - '+esc(r.title||"(untitled)")+'</a>'+
-      '<span class="w">'+esc(r.who||"-")+'</span><span class="ag">'+fmt(r.age_s)+'</span>';
+      '<span class="w">'+esc(r.who||"-")+'</span><span class="ag">'+fmt(+r.age_s)+'</span>';
     var b=document.createElement("button"); b.textContent="✕"; b.title="clear this one";
-    b.onclick=function(){ fetch(r.ack_url,{cache:"no-store"}).then(tick); d.remove(); };
+    b.onclick=function(){ fetch(r.ack_url,{method:"POST",cache:"no-store"}).then(tick); d.remove(); };
     d.appendChild(b);
     list.appendChild(d);
   });
@@ -48,7 +49,7 @@ function wireNotes(){
     if(!box.hidden && !box.contains(e.target) && e.target!==bell) box.hidden=true; });
   document.addEventListener("keydown", function(e){ if(e.key==="Escape") box.hidden=true; });
   var ca=document.getElementById("clearall");
-  if(ca) ca.onclick=function(){ fetch("/ack/all",{cache:"no-store"}).then(tick); };
+  if(ca) ca.onclick=function(){ fetch("/ack/all",{method:"POST",cache:"no-store"}).then(tick); };
 }
 
 function drawCounts(c){
@@ -67,11 +68,11 @@ function drawHeader(d){
 // The state slot: live -> working · 4m (or no heartbeat), queued, or the verdict of a finished card.
 // Every state reads as a chip tinted in its own tone: working green, no heartbeat amber, queued blue,
 // verified green, verify failed red, unverified amber, done teal, blocked red.
-function chip(text, tone){ return '<span class="schip" style="--tone:var(--crew-tone-'+tone+')">'+text+'</span>'; }
+function chip(text, tone){ return '<span class="schip" style="--tone:var(--crew-tone-'+esc(tone)+')">'+esc(text)+'</span>'; }
 function stateHTML(t){
   if(t.active){
     if(t.active.quiet_s!==null && t.active.quiet_s>QUIET_S) return chip("no heartbeat", "review");
-    return chip("working · "+fmt(t.active.for_s), "running");
+    return chip("working · "+fmt(+t.active.for_s), "running");
   }
   if(t.status==="ready"||t.status==="todo") return chip("queued", "ready");
   if(t.status==="blocked"||t.status==="triage") return chip(t.status==="triage" ? "needs you" : "blocked", "blocked");
@@ -86,16 +87,16 @@ function stateHTML(t){
 function cardHTML(t){
   var tone = TONE[t.status] || "var(--crew-tone-neutral)";
   var who = t.active ? t.active.profile : (t.role || t.assignee || "unassigned");
-  var left = avatar(t.role, t.color)+'<span class="who">'+esc(who)+'</span>'+stateHTML(t);
+  var left = avatar(who === "unassigned" ? "" : who, t.color)+'<span class="who">'+esc(who)+'</span>'+stateHTML(t);   // the face is the named one's
   var r = "";
-  if(t.runs>1) r += '<span title="runs">↻ '+t.runs+'</span>';
+  if(t.runs>1) r += '<span title="runs">↻ '+(+t.runs||0)+'</span>';
   var b = t.budget;
-  if(b && b.pct>=80) r += '<span class="'+(b.pct>=100?"bad":"warn")+'" title="token budget: '+b.used+' of '+b.ceiling+'">'+
+  if(b && b.pct>=80) r += '<span class="'+(b.pct>=100?"bad":"warn")+'" title="token budget: '+(+b.used||0)+' of '+(+b.ceiling||0)+'">'+
     Math.round(b.pct)+'%</span>';
   r += '<span title="time in this state">'+fmt(t.settled_s!==null&&t.settled_s!==undefined?t.settled_s:t.age_s)+'</span>'+
-       '<span class="id" title="'+esc(t.id)+'">'+shortId(t.id)+'</span>';
+       '<span class="id" title="'+esc(t.id)+'">'+esc(shortId(t.id))+'</span>';
   var motion = t.active ? (t.active.quiet_s!==null && t.active.quiet_s>QUIET_S ? " quiet" : " live") : "";
-  return '<a class="card'+motion+'" data-id="'+esc(t.id)+'" href="/card/'+esc(t.id)+'" style="--tone:'+tone+'">'+
+  return '<a class="card'+motion+'" data-id="'+esc(t.id)+'" href="/card/'+esc(t.id)+'" style="--tone:'+esc(tone)+'">'+
     '<div class="ti">'+esc(t.title||"(untitled)")+'</div>'+
     (t.summary?'<div class="su">'+esc(t.summary)+'</div>':'')+
     '<div class="ft">'+left+'<span class="r">'+r+'</span></div></a>';
@@ -104,12 +105,15 @@ function cardHTML(t){
 function laneHTML(l){
   var tone = TONE[l.key] || "var(--crew-tone-neutral)";
   var tiles = l.tiles, n = l.tiles.length + (l.hidden||0);
-  if(!n) return '<section class="lane rail" data-lane="'+l.key+'" style="--tone:'+tone+'" title="'+esc(l.label)+': empty">'+
+  if(l.key==="archived" && n && !store("archived.open")) return '<section class="lane rail togglable" data-lane="archived" data-toggle="archived" '+
+    'role="button" tabindex="0" aria-expanded="false" style="--tone:'+esc(tone)+'" title="Archived: '+n+' - click to open">'+
+    '<div class="lh"><i></i></div><span class="lt">'+esc(l.label)+'</span><span class="ln">'+n+'</span></section>';
+  if(!n) return '<section class="lane rail" data-lane="'+esc(l.key)+'" style="--tone:'+esc(tone)+'" title="'+esc(l.label)+': empty">'+
     '<div class="lh"><i></i></div><span class="lt">'+esc(l.label)+'</span></section>';
-  var more = l.hidden ? '<button class="more" data-older="1">Show '+l.hidden+' older</button>'
+  var more = (l.hidden && l.key==="done") ? '<button class="more" data-older="1">Show '+(+l.hidden||0)+' older</button>'
            : (l.key==="done" && store("older") ? '<button class="more" data-older="0">Show the newest only</button>' : '');
-  return '<section class="lane" data-lane="'+l.key+'" style="--tone:'+tone+'">'+
-    '<div class="lh"><i></i><span class="lt">'+esc(l.label)+'</span><span class="ln">'+n+'</span></div>'+
+  return '<section class="lane" data-lane="'+esc(l.key)+'" style="--tone:'+esc(tone)+'">'+
+    '<div class="lh"'+(l.key==="archived" ? ' data-toggle="archived" role="button" tabindex="0" aria-expanded="true" title="click to collapse"' : '')+'><i></i><span class="lt">'+esc(l.label)+'</span><span class="ln">'+n+'</span></div>'+
     '<div class="lbody">'+tiles.map(cardHTML).join("")+more+'</div></section>';
 }
 
@@ -133,6 +137,19 @@ function draw(d){
   if(more) more.onclick=function(){ store("older", more.getAttribute("data-older")==="1" ? "1" : null); tick(); };
 }
 
+// The Archived column is the one lane the viewer opens and closes: a collapsed rail (title + count) or a
+// full lane; the choice is kept per viewer like the other board state. One delegated handler - the lanes are redrawn.
+function wireToggle(){
+  var main=document.getElementById("board"); if(!main) return;
+  function flip(e){
+    var el=e.target.closest ? e.target.closest("[data-toggle]") : null; if(!el) return;
+    if(e.type==="keydown"){ if(e.key!=="Enter" && e.key!==" ") return; e.preventDefault(); }
+    var k="archived.open"; store(k, store(k) ? null : "1");
+    if(LAST) draw(LAST);
+  }
+  main.addEventListener("click", flip); main.addEventListener("keydown", flip);
+}
+
 function stale(on){
   var el=document.getElementById("stale"); if(!el) return;
   var b=document.getElementById("badge");
@@ -149,5 +166,7 @@ function tick(){
     .catch(function(){ stale(true); });
 }
 wireNotes();
+wireToggle();
+if(location.hash==="#archived") store("archived.open","1");   // a link that opens the column
 setInterval(tick, 2000);
 if(store("older")) tick();

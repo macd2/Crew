@@ -51,10 +51,8 @@ def open_card(title, proof, verify):
     return m.group(1)
 
 
-def verdict(cid, by, command=None):
+def verdict(cid, by):
     args = [sys.executable, CARD, "verdict", "--card", cid, "--by", by, "--no-hand-back"]
-    if command:
-        args += ["--command", command]
     return subprocess.run(args, env=cp.ENV, capture_output=True, text=True, timeout=300)
 
 
@@ -104,8 +102,8 @@ def main():
     check("B: the proof line on the card is rewritten to `true`",
           crew_card.proof_cmd(cp.card(a)["body"]) == "true", "rc=%d" % r.returncode)
     v = verdict(a, worker)
-    check("B: the verdict tool still runs the snapshot: FAIL, and says the line differs",
-          v.returncode == 1 and "differs from the one the card opened with" in v.stdout and
+    check("B: the verdict tool still runs the snapshot: FAIL, and says the line is ignored",
+          v.returncode == 1 and "is not the one the card opened with" in v.stdout and
           lines(a)[-1]["command"] == proof_a and lines(a)[-1]["verdict"] == "FAIL", v.stdout.strip().splitlines()[-1][:80])
     crew_card.record_verdict(a, "true", 0, "hand-written", 0, by=worker)          # a PASS for the rewritten command
     g = plug._close_guard("kanban_complete", {"task_id": a})
@@ -191,9 +189,8 @@ def main():
     rr = cp.cli("request-review", f, "--summary", "done; proof PASS", "--reviewer", "crew-verifier")
     reviewing = crew_proof_board.claim_review(cp.DB, f, cp.REAL_HOME)
     verdict(f, "crew-verifier")
-    verdict(f, "crew-verifier", command="test -s %s" % target_f)                # the one extra check
     g = plug._close_guard("kanban_complete", {"task_id": f})
-    check("F: after the verifier's PASS and its one extra check the close is allowed",
+    check("F: after the verifier's PASS the close is allowed",
           rr.returncode == 0 and reviewing and g is None, str(g)[:100])
     cp.cli("complete", f, "--summary", "verified")
     cp.coordinator()

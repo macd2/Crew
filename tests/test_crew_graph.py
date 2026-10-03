@@ -31,6 +31,12 @@ class DecisionLabelTests(unittest.TestCase):
         self.assertEqual("coordinator could not decide: no JSON",
                          cg.decision_label({"decision": "error", "problem": "no JSON"}))
 
+    def test_a_blocked_audit_is_not_read_as_a_pass(self):
+        got = cg.decision_label({"decision": "audit", "outcome": "blocked", "followup": "t_9", "why": "why"})
+        self.assertIn("blocked by Hermes safety", got)
+        self.assertIn("t_9", got)
+        self.assertNotIn("still passes", got)
+
     def test_an_unknown_verb_is_still_a_line(self):
         self.assertEqual("coordinator decided: new_thing", cg.decision_label({"decision": "new_thing"}))
 
@@ -148,8 +154,8 @@ class ResultOutTests(unittest.TestCase):
     def test_a_search_result_says_what_it_matched(self):
         """A step whose result is a list of matches must not read as having printed nothing."""
         raw = json.dumps({"total_count": 1, "matches": [
-            {"path": "/x/kanban_zulip_feed.py", "line": 551, "content": "CARD_BASE = ..."}]})
-        self.assertEqual(("ok", "", "1 matches: /x/kanban_zulip_feed.py:551"), result_row(raw))
+            {"path": "/x/crew_card.py", "line": 551, "content": "CARD_BASE = ..."}]})
+        self.assertEqual(("ok", "", "1 matches: /x/crew_card.py:551"), result_row(raw))
 
     def test_an_empty_result_prints_nothing(self):
         self.assertEqual("", result_row(json.dumps({}))[2])

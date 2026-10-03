@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""Proof for the crew notification path (chat side of one card).
+"""Proof for the owner's return path (scripts/crew_notify.py): what reaches the chat, and what does not.
 
-Done when a card whose body carries an `Origin:` line reports back into that origin chat/thread as
-soon as it ends `done`, alerts the shared topic `crew-alerts` when it ends `blocked`, and the daemon
-that carries both posts runs without the file-descriptor exhaustion that killed it before.
+Done when, on a scratch board, one dry notify pass prints exactly:
+  1. a done card with an Origin: one report whose target is that origin, once (a second pass with the state
+     the first one would have left prints nothing: the dedupe is per card+event);
+  2. a blocked card the coordinator still owns (no decision, or a retry decision): nothing;
+  3. a blocked card whose newest decision is ask_owner: one needs-you message carrying the question, to the origin;
+  4. a done card with no Origin: nothing (no chat asked for it);
+  5. no credential from the owner profile's .env anywhere in the output.
+`--send TARGET` additionally sends one real done report through `hermes send` (the delivery path itself).
 
-Checks (stdlib only, no browser):
-  1. crew_card.py open accepts --origin and the card body records it verbatim.
-  2. a done probe card: one feed pass (scratch state) prints a post whose target is the origin topic.
-  3. a blocked probe card: one feed pass prints a post whose target is crew-alerts.
-  4. a card with no Origin line produces no crew-alerts post (only the cards this chat opened ping).
-  5. no credential value from the profile .env appears in the captured output (a bare service base
-     URL is not a credential).
-  6. kanban-zulip-feed.service is active, its main process holds a stable open-descriptor count over
-     60 s, and its journal carries no 'Too many open files' line since the last restart.
-
-Read-only against the board except for two probe cards, both archived again at the end.
-Exit 0 = every check passed. Non-zero = it did not, and the failing check is printed.
+Nothing touches the live board or a live chat unless --send is given. Exit 0 = every check passed.
 """
+import json
 import os
 import re
 import sqlite3
@@ -25,217 +20,89 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import crew_card  # noqa: E402 - the owner profile, the base home and the package checkout
-HOME = os.environ.get("HERMES_HOME") or crew_card.owner_home()
-KANBAN_DB = os.environ.get("KANBAN_DB") or os.path.join(crew_card.base_home(), "kanban.db")
-CARD_TOOL = os.path.join(HERE, "crew_card.py")
-FEED = os.path.join(HERE, "kanban_zulip_feed.py")
-SERVICE = "kanban-zulip-feed.service"
-ALERT_TOPIC = "crew-alerts"
+sys.path.insert(0, HERE)
+import crew_card  # noqa: E402
+import crew_notify  # noqa: E402
+
 ORIGIN = "zulip:stream:Kanban|PROBE origin thread"
-PROBE = "probe"
-# scheme + host + optional port, nothing else: a service base URL, never a credential.
 BARE_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:[0-9]+)?/?$")
 FAILURES = []
+SCHEMA = (
+    "create table tasks (id text primary key, title text, body text, status text, assignee text, created_at integer, "
+    "completed_at integer, result text, last_failure_error text);"
+    "create table task_runs (id integer primary key, task_id text, summary text);"
+    "create table task_links (parent_id text, child_id text);"
+    "create table task_events (id integer primary key, task_id text, run_id integer, kind text, payload text, "
+    "created_at integer);")
 
 
 def check(name, ok, detail=""):
-    print("%-58s %s%s" % (name, "PASS" if ok else "FAIL", ("  " + detail) if detail else ""))
+    print("%-62s %s%s" % (name, "PASS" if ok else "FAIL", ("  " + detail) if detail else ""))
     if not ok:
         FAILURES.append(name)
-    return ok
 
 
-def run(argv, state=None, timeout=120):
-    env = dict(os.environ)
-    env["HERMES_HOME"] = HOME
-    if state:
-        env["KANBAN_FEED_STATE"] = state
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-
-
-def open_probe(title, origin=True):
-    """A probe card, seeded straight into the board database.
-
-    No CLI: a worker or verifier context has to be able to run this proof too, and `crew_card.py
-    open` does not always succeed there. The body carries the coordinator line the feed looks for and
-    the origin verbatim, exactly as `crew_card.py open --origin ...` would have written them. The
-    card starts archived so neither the feed nor the dispatcher touches it before the proof sets the
-    status it wants to test.
-    """
-    card = "t_" + uuid.uuid4().hex[:8]
-    body = ("Coordinator: %s/\n"
-            "Goal: probe card: proves the crew notification path routes a done report to the origin "
-            "chat and a blocked alert to the shared crew-alerts topic\n"
-            "Role: worker\nproof command: true\n"
-            % (os.environ.get("CREW_ROLE") or crew_card.owner_profile()))
+def seed(conn, cid, status, origin=True, events=()):
+    now = int(time.time())
+    body = "Coordinator: %s/probe\nRole: worker\nGoal: probe\n" % crew_card.owner_profile()
     if origin:
         body += "Origin: %s\n" % ORIGIN
-    conn = sqlite3.connect(KANBAN_DB)
-    try:
-        conn.execute(
-            "insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
-            "workspace_kind) values (?, ?, ?, 'crew-worker', 'archived', 0, 'probe', ?, 'scratch')",
-            (card, title, body, int(time.time())))
-        conn.commit()
-    except Exception as exc:  # noqa: BLE001
-        conn.close()
-        return None, "seeding failed: %s" % str(exc)[:120], 2
-    conn.close()
-    return card, "seeded %s" % card, 0
-
-
-def set_status(card, status):
-    conn = sqlite3.connect(KANBAN_DB)
-    conn.execute("update tasks set status = ? where id = ?", (status, card))
+    conn.execute("insert into tasks values (?,?,?,?,?,?,?,?,?)",
+                 (cid, "PROBE %s" % cid, body, status, "crew-worker", now - 60, now if status == "done" else None,
+                  "probe result", None))
+    for kind, payload in events:
+        conn.execute("insert into task_events (task_id, kind, payload, created_at) values (?,?,?,?)",
+                     (cid, kind, json.dumps(payload), now))
     conn.commit()
-    conn.close()
 
 
-def body_of(card):
-    conn = sqlite3.connect(KANBAN_DB)
-    row = conn.execute("select coalesce(body,'') from tasks where id = ?", (card,)).fetchone()
-    conn.close()
-    return row[0] if row else ""
-
-
-def feed_pass(state):
-    return run([sys.executable, FEED, "--dry-run", "--once"], state=state)[1]
-
-
-def posted_targets(text, card):
-    """Topics the captured pass says it posted this card's report into."""
-    out = []
-    for line in text.splitlines():
-        if card in line and line.lstrip().startswith("---"):
-            m = re.search(r"---\s*#(\S+)\s*>\s*([^()]+?)\s*\(", line)
-            if m:
-                out.append((m.group(1), m.group(2).strip()))
-    return out
-
-
-def service_main_pid():
-    rc, out = run(["systemctl", "--user", "show", SERVICE, "-p", "MainPID", "--value"])
-    return int(out.strip() or 0)
-
-
-def open_fds(pid):
-    try:
-        return len(os.listdir("/proc/%d/fd" % pid))
-    except OSError:
-        return -1
-
-
-def journal_since_restart():
-    rc, txt = run(["journalctl", "--user", "-u", SERVICE, "-n", "200", "--no-pager", "-o", "cat"])
-    lines = txt.splitlines()
-    cut = 0
-    for i in range(len(lines) - 1, -1, -1):
-        if "Started" in lines[i] or "Stopping" in lines[i]:
-            cut = i
-            break
-    return "\n".join(lines[cut:])
+def dry(db, state):
+    lines = []
+    crew_notify.run(db, state, dry_run=True, say=lines.append)
+    return "\n".join(lines)
 
 
 def main():
-    state_dir = tempfile.mkdtemp(prefix="crew-notify-proof-")
-    probe_done, probe_blocked, probe_plain = None, None, None
-    text = ""
-    try:
-        # 1 - the contract records where the card came from.
-        probe_done, out, rc = open_probe("PROBE notify done %s" % os.path.basename(state_dir))
-        check("crew_card.py open accepts --origin", rc == 0 and probe_done is not None, out.strip()[:80])
-        if probe_done:
-            body = body_of(probe_done)
-            check("card body records the origin verbatim", ORIGIN in body)
-
-        # 2 - a done card reports into its origin thread.
-        if probe_done:
-            set_status(probe_done, "done")
-            text = feed_pass(os.path.join(state_dir, "done.json"))
-            targets = posted_targets(text, probe_done)
-            check("done card posts once, into its origin topic",
-                  len(targets) == 1 and targets[0][1] == "PROBE origin thread",
-                  "; ".join("%s > %s" % t for t in targets) or "no post for %s" % probe_done)
-
-        # 3 - a blocked card alerts the shared topic.
-        probe_blocked, out, rc = open_probe("PROBE notify blocked %s" % os.path.basename(state_dir))
-        if probe_blocked:
-            set_status(probe_blocked, "blocked")
-            text = feed_pass(os.path.join(state_dir, "blocked.json"))
-            targets = posted_targets(text, probe_blocked)
-            # A stuck card alerts the shared topic AND the chat it came from, once each.
-            check("blocked card alerts #%s and its origin, once each" % ALERT_TOPIC,
-                  len(targets) == 2
-                  and sorted(t[1] for t in targets) == sorted([ALERT_TOPIC, "PROBE origin thread"]),
-                  "; ".join("%s > %s" % t for t in targets) or "no post for %s" % probe_blocked)
-
-        # 4 - a card with no origin does not ping.
-        probe_plain, out, rc = open_probe("PROBE notify plain %s" % os.path.basename(state_dir),
-                                         origin=False)
-        if probe_plain:
-            set_status(probe_plain, "blocked")
-            text = feed_pass(os.path.join(state_dir, "plain.json"))
-            check("a stuck card with no origin still alerts #%s" % ALERT_TOPIC, probe_plain in text)
-            check("a stuck card with no origin has no chat to report into",
-                  ("PROBE origin thread" not in text) or (probe_plain not in text.split("PROBE origin thread")[0][-200:]))
-        else:
-            check("a probe card without an origin can be opened", False, out.strip()[:60])
-
-        # 5 - no credential reaches the post.
-        # A bare scheme+host(+port) from .env (ZULIP_SITE) is the base URL the feed is meant to
-        # print as the card link, so it is not a credential; anything with a path, a query, a
-        # userinfo or non-URL shape is still treated as a secret.
-        env_path = os.path.join(HOME, ".env")
-        if os.path.exists(env_path):
-            secrets = []
-            with open(env_path, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if "=" in line and not line.strip().startswith("#"):
-                        _, _, v = line.partition("=")
-                        v = v.strip().strip('"').strip("'")
-                        if len(v) >= 16 and not BARE_URL_RE.match(v):
-                            secrets.append(v)
-            captured = text
-            check("no credential from .env appears in the pass output",
-                  not any(s in captured for s in secrets))
-
-        # 6 - the daemon carries it without dying again.
-        pid = service_main_pid()
-        limit = 0
-        try:
-            with open("/proc/%d/limits" % pid) as fh:
-                for line in fh:
-                    if line.startswith("Max open files"):
-                        limit = int(line.split()[3])
-        except OSError:
-            limit = 0
-        first = open_fds(pid)
-        time.sleep(60)
-        second = open_fds(pid)
-        check("%s active" % SERVICE,
-              run(["systemctl", "--user", "is-active", SERVICE])[1].strip() == "active")
-        check("open descriptors below the process limit", limit == 0 or 0 < first < limit,
-              "fds %d of limit %d" % (first, limit))
-        check("open descriptors stable over 60 s", first > 0 and second >= 0
-              and second - first <= 5, "fds %d -> %d" % (first, second))
-        check("no 'Too many open files' since the restart",
-              "Too many open files" not in journal_since_restart())
-    finally:
-        for card in (probe_done, probe_blocked, probe_plain):
-            if card:
-                set_status(card, "archived")
-
+    send_to = sys.argv[sys.argv.index("--send") + 1] if "--send" in sys.argv else ""
+    tmp = tempfile.mkdtemp(prefix="crew-notify-proof-")
+    db, state = os.path.join(tmp, "kanban.db"), os.path.join(tmp, "notify-state.json")
+    conn = sqlite3.connect(db)
+    conn.executescript(SCHEMA)
+    seed(conn, "t_done", "done", events=[("completed", {})])
+    seed(conn, "t_owned", "blocked", events=[("blocked", {"reason": "stuck"}), ("crew_decision", {"decision": "retry"})])
+    seed(conn, "t_ask", "blocked", events=[("blocked", {"reason": "stuck"}),
+                                           ("crew_decision", {"decision": "ask_owner", "question": "Which branch?"})])
+    seed(conn, "t_plain", "done", origin=False, events=[("completed", {})])
+    conn.close()
+    text = dry(db, state)
+    sends = re.findall(r"^--- (.+?) \((\w+) (t_\w+)\)", text, re.M)
+    check("done card: one report into its origin", sends.count((ORIGIN, "done", "t_done")) == 1, str(sends))
+    check("blocked card the coordinator owns: silent", not any(c == "t_owned" for _t, _k, c in sends))
+    check("ask_owner card: one needs-you with the question into the origin",
+          (ORIGIN, "needs", "t_ask") in sends and "Which branch?" in text)
+    check("done card with no origin: silent", not any(c == "t_plain" for _t, _k, c in sends))
+    check("nothing else went out", len(sends) == 2, str(sends))
+    crew_notify.save_state(state, {"since": time.time() - 3600,
+                                   "sent": {"t_done": ["done:1"], "t_ask": ["ask:5"]}, "tries": {}})
+    check("keys already sent are not printed again", not re.search(r"^--- ", dry(db, state), re.M))
+    env_path = os.path.join(crew_card.owner_home(), ".env")
+    if os.path.exists(env_path):
+        secrets = []
+        for line in open(env_path, encoding="utf-8", errors="replace"):
+            if "=" in line and not line.strip().startswith("#"):
+                v = line.partition("=")[2].strip().strip('"').strip("'")
+                if len(v) >= 16 and not BARE_URL_RE.match(v):
+                    secrets.append(v)
+        check("no credential from .env in the output", not any(s in text for s in secrets))
+    if send_to:
+        ok, detail = crew_notify.hermes_send(send_to, "🟢 done · t_probe · crew_notify_proof\nreal delivery check")
+        check("real send through `hermes send -t %s`" % send_to, ok, detail)
     if FAILURES:
         print("PROOF FAIL: %d check(s) failed: %s" % (len(FAILURES), "; ".join(FAILURES)))
         return 1
-    print("PROOF OK: done reports land in the origin thread, blocked alerts in #%s, "
-          "no-origin cards stay silent, the daemon holds its descriptors" % ALERT_TOPIC)
+    print("PROOF OK: done and owner questions reach the origin once, everything the coordinator owns stays silent")
     return 0
 
 

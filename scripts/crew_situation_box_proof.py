@@ -295,7 +295,7 @@ def main():
 
     profile = tempfile.mkdtemp(prefix="crew-sitbox-")
     proc = subprocess.Popen(
-        [CHROME, "--headless=new", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=%d" % PORT,
+        [CHROME, "--headless=new", "--password-store=basic", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=%d" % PORT,
          "--user-data-dir=" + profile, "--window-size=1400,900", "%s/card/%s" % (URL, pending)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)

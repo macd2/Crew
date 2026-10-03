@@ -1,5 +1,5 @@
 name: crew
-version: 0.6.3
+version: 0.7.0
 manifest_version: 2
 api_version: 1
 author: macd2
@@ -20,6 +20,6 @@ provides_hooks:
   - post_api_request
   - api_request_error
   - on_kanban_dispatch_tick
-# The four skills (crew, crew-verifier, crew-role-worker, crew-role-content) are registered at
-# runtime by ctx.register_skill and shipped as skills/<name>/SKILL.md; plugin.yaml has no field for
-# them, so they are listed here as a comment rather than as an ignored key.
+# register() registers one skill at runtime: crew-verifier (ctx.register_skill). The other skills
+# (crew, crew-role-worker, crew-role-content, crew-diagnose) ship as skills/<name>/SKILL.md and the
+# installer copies them into <profile>/skills/crew/; plugin.yaml has no field for skills.
