@@ -141,10 +141,10 @@ once:
 ```
 Proof commands run unattended. How careful should crew be?
 
-  1) Hermes safety (default): a flagged command (rm, chmod, curl | sh, ...)
+  1) Hermes safety (default): a flagged command (rm, chmod, a download piped into a shell, ...)
      stops the card and asks you.
   2) Be brave 🫡 (YOLO): nothing stops a proof except Hermes's hardline list
-     (rm -rf /, mkfs, fork bombs). Crew will happily rm what the proof says.
+     (wiping the root, formatting a disk, fork bombs). Crew will happily rm what the proof says.
      Your call, your disk.
 ```
 

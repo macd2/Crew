@@ -158,8 +158,8 @@ run `python3 "$HERMES_HOME/plugins/crew/scripts/crew_card.py" safety` (it prints
 ```
 question: "Proof commands run unattended. How careful should crew be? Proof: `<the proof command>` (/crew-safety brave stops this question for good)"
 choices:
-  - "Hermes safety: a flagged command (rm, chmod, curl | sh, ...) stops the card and asks you"
-  - "Be brave 🫡 (YOLO): nothing stops a proof except Hermes's hardline list (rm -rf /, mkfs, fork bombs). Crew will happily rm what the proof says. Your call, your disk."
+  - "Hermes safety: a flagged command (rm, chmod, a download piped into a shell, ...) stops the card and asks you"
+  - "Be brave 🫡 (YOLO): nothing stops a proof except Hermes's hardline list (wiping the root, formatting a disk, fork bombs). Crew will happily rm what the proof says. Your call, your disk."
 ```
 
   Only when `clarify` is unavailable (one-shot `hermes chat -q`) put the same two options, numbered, in the

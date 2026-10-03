@@ -6,7 +6,7 @@ the verifier's run), the coordinator's verify/audit runs, and the stale-block he
 below, and nowhere else. A proof is not a tool call, so Hermes's approvals never see it; this module puts the
 same floors in front of it:
 
-  always   Hermes's hardline list (rm -rf /, mkfs, fork bombs) and the owner's `approvals.deny` globs
+  always   Hermes's hardline list (wiping the root, formatting a disk, fork bombs) and the owner's `approvals.deny` globs
   safe     also anything Hermes flags as dangerous (detect_dangerous_command, unless permanently approved)
            or tirith flags - the default
   brave    nothing else; chosen per card (`Proof mode: brave` in the intake, stored on the card's snapshot)
