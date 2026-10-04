@@ -52,6 +52,11 @@ def _parse_roles(roles):
     return ["all"] if "all" in out else out
 
 
+def _agent_run():
+    """True inside a dispatcher-spawned worker/verifier run or the coordinator's decision turn."""
+    return bool(os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("CREW_COORDINATOR_TURN"))
+
+
 def entries():
     """[(date, [roles], text)] in file order; a missing or unreadable file is no lessons."""
     try:
@@ -75,6 +80,9 @@ def add(roles, text):
     """Record a lesson. Returns 'added' or 'duplicate'. Identical (roles, text) is not recorded twice; past the cap
     the oldest entries go."""
     roles = _parse_roles(roles)
+    if _agent_run() and roles == ["all"]:
+        raise ValueError("an agent may not write `--role all` lessons (that channel reaches /crew's intake; "
+                         "tag your own role instead and the owner promotes it)")
     text = " ".join((text or "").split())
     if not text:
         raise ValueError("--text is required")

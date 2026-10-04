@@ -105,6 +105,8 @@ def main():
         check("the page carries the card title", "PROBE never-run card" in page)
         check("the page keeps its rail", has_id(page, "rail"))
         check("the page keeps its stage", has_id(page, "stage"))
+        check("the page carries the brand mark, linking to the overview",
+              'class="brand" href="/"' in page)
         check("the page says the card has not run", "not run" in page.lower()
               or "no runs" in page.lower() or "hasn't run" in page.lower())
         code, raw = get("/card/%s.json" % fresh)

@@ -574,6 +574,21 @@ def favicon_link():
     return '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,%s">' % data
 
 
+def logo_link():
+    """The header mark as a link home: the same logo mark with no background as the tab icon, embedded
+    like the CSS so the page stays one self-contained document, pointing at the overview (/). The SVG
+    carries the mark for a dark and a light page (dev/make_favicon.py), so the black ring of the
+    on-light variant never disappears into a dark host background. A missing file costs the mark,
+    never the page."""
+    try:
+        with open(os.path.join(DASH_DIR, "favicon.svg"), "rb") as fh:
+            data = base64.b64encode(fh.read()).decode("ascii")
+    except OSError:
+        return ""
+    return ('<a class="brand" href="/" title="overview" aria-label="crew overview">'
+            '<img src="data:image/svg+xml;base64,%s" alt="" width="26" height="26"></a>' % data)
+
+
 def profile_homes():
     """Every Hermes home that exists: the base home and each <base>/profiles/<name>."""
     base = base_home()
@@ -2116,6 +2131,7 @@ def render_html(graph, json_filename, nonce=None):
 <style>{css}</style>
 </head>
 <body class="page-card" data-card="%(card_id)s">
+{brand}
 <div id="event"></div>
 <div id="main">
   <div id="toparea">
@@ -2201,7 +2217,7 @@ def render_html(graph, json_filename, nonce=None):
 </script>
 </body>
 </html>
-""".format(title=title, favicon=favicon_link(), css=css, js=js,
+""".format(title=title, favicon=favicon_link(), brand=logo_link(), css=css, js=js,
                nonce_attr=(' nonce="%s"' % _html.escape(nonce, quote=True)) if nonce else "", **_tok_fields(graph.get("tokens")),
                **_brief_fields(graph))
 

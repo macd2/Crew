@@ -255,10 +255,14 @@ class IntakeFactsTests(unittest.TestCase):
         self.assertIn('<skill name="crew">', ctx)
         self.assertIn("<crew-facts>", ctx)
 
-    def test_no_card_tool_means_no_facts_and_no_error(self):
+    def test_no_card_tool_still_opens_with_the_banner(self):
+        """No crew facts readable: the wordmark still goes, the facts block just does not."""
         with unittest.mock.patch.object(self.plug, "_card_tool", return_value=None):
-            self.assertIsNone(self.plug.crew_intake_preload(
-                user_message='[IMPORTANT: The user has invoked the "crew" skill] ask', session_id="SH", turn_id="T"))
+            out = self.plug.crew_intake_preload(
+                user_message='[IMPORTANT: The user has invoked the "crew" skill] ask', session_id="SH", turn_id="T")
+        ctx = (out or {}).get("context", "")
+        self.assertIn("HERMES.CREW", ctx)
+        self.assertNotIn("<crew-facts>", ctx)
 
 
 if __name__ == "__main__":
@@ -384,3 +388,30 @@ class AnsweringReportTests(IntakeCase):
     def test_no_session_report_opens_nothing(self):
         self.plug.crew_intake_preload(user_message=WATCH_REPORT, session_id=None, turn_id="T1")
         self.assertEqual({}, self.plug._REPORT_WINDOWS)
+
+
+class BannerTests(unittest.TestCase):
+    """A /crew turn opens with the HERMES.CREW wordmark and the plugin's own version."""
+
+    def setUp(self):
+        os.environ.setdefault("HERMES_HOME", tempfile.mkdtemp(prefix="crew-intake-test-"))
+        self.plug = load_plugin()
+
+    def test_the_raw_slash_turn_opens_with_the_line(self):
+        ctx = self.plug.crew_intake_preload(
+            user_message="/crew make it fast", session_id="SB1", turn_id="T")["context"]
+        self.assertTrue(ctx.startswith("Open your reply"))
+        self.assertIn("HERMES.CREW v", ctx)
+        self.assertNotIn("#   #", ctx)          # the ASCII art is gone
+
+    def test_the_expanded_skill_turn_opens_with_the_banner(self):
+        out = self.plug.crew_intake_preload(
+            user_message='[IMPORTANT: The user has invoked the "crew" skill] ask', session_id="SB2", turn_id="T")
+        self.assertIn("HERMES.CREW v", (out or {}).get("context", ""))
+
+    def test_the_version_comes_from_the_manifest(self):
+        self.assertRegex(self.plug._crew_banner(), r"^HERMES\.CREW v\d")
+
+    def test_an_ordinary_turn_gets_no_banner(self):
+        self.assertIsNone(self.plug.crew_intake_preload(
+            user_message="what about the menu?", session_id="SB3", turn_id="T"))

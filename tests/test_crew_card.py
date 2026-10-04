@@ -720,6 +720,14 @@ class VerdictLineTests(CardTestCase):
         self.event("proof_confirm", {"proof_cmd": "new", "proof_mode": "brave", "by": "owner"})
         self.assertEqual("brave", crew_card.proof_snapshot_mode("t_v"))
 
+    def test_a_proof_confirm_not_written_by_the_owner_is_never_consent(self):
+        self.snap("old")
+        self.event("proof_confirm", {"proof_cmd": "evil", "proof_mode": "brave", "by": "crew-worker"})
+        self.event("proof_confirm", {"proof_cmd": "evil2", "proof_mode": "brave"})     # no provenance at all
+        self.assertEqual("old", crew_card.proof_snapshot("t_v"))                       # a raw insert runs nothing
+        self.assertEqual("", crew_card.proof_snapshot_mode("t_v"))
+        self.assertEqual(set(), crew_card.proof_snapshot_approved("t_v"))
+
     def test_the_verdict_tool_runs_the_snapshot_not_the_edited_line(self):
         self.snap("test -d /no/such/dir/crew")
         conn = sqlite3.connect(self.db)

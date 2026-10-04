@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.7.0-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.7.8-3fb950?style=flat-square)](plugin.yaml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-crew.forgecoreai.com-0a0e14?style=flat-square)](https://crew.forgecoreai.com)
@@ -113,6 +113,7 @@ review them with `hermes -p P hooks list` and confirm them at Hermes's own promp
 | `/crew-stop [<card>]` | Park one card, or every open crew card: worker killed, card held with its history, nothing archived. `--archive <card>` drops one for good. No model call. |
 | `/crew-unstuck <card>` | Put a card the coordinator gave up on, or one you parked with `/crew-stop`, back in the queue (out of triage unchanged, or unblocked). No model call. |
 | `/crew-safety [brave\|safe]` | Show or set how careful unattended proof commands are (see below). No model call. |
+| `/crew-proof <card> <yes\|brave>` | Answer a card's proof question: `yes` accepts a proposed proof command, `brave` runs a blocked one. No model call. |
 | `/crew-diagnose [state]` | Read-only: every card in that state, why it is there and how it would resume. |
 
 Or paste this into an agent and let it set crew up for you:
@@ -130,8 +131,9 @@ applies to. It is never shipped and the installer and `crew_parity_check` leave 
 with `python3 "$HERMES_HOME/plugins/crew/scripts/crew_card.py" lesson --role content,verifier --text "..."`
 (identical lessons are stored once; the newest 50 entries / 8 KB are kept); editing a crew skill with
 `skill_manage` is refused in every profile, because an installed skill is overwritten by the next install. The
-plugin adds a role's lessons (and the `all` ones) to that role's turn, and the `all` ones to `/crew`'s intake.
-To make a lesson permanent, move it into the matching `skills/*/SKILL.md` in a release and delete it from the file.
+The plugin adds a role's lessons (and the `all` ones) to that role's turn, and the `all` ones to `/crew`'s intake.
+An agent may not write `--role all` lessons (that is the owner's intake channel); it tags its own role and the
+owner promotes it. To make a lesson permanent, move it into the matching `skills/*/SKILL.md` in a release and delete it from the file.
 
 ## Proof safety
 
@@ -152,8 +154,9 @@ Proof commands run unattended. How careful should crew be?
   or a coordinator rescope, cannot change it; a new proof needs your yes again.
 - **Hermes decides what is dangerous.** Crew uses Hermes's own checks: the hardline list and your
   `approvals.deny` rules always block; in safe mode Hermes's dangerous-command and tirith checks block too.
-  If the proof you are confirming would be flagged, the intake tells you right then, and your yes approves
-  that exact command, so the card does not stop later to ask.
+  If the proof you are confirming would be flagged, the card opens in safe mode and the coordinator asks you;
+  answer `/crew-proof <card> brave` to run it for that card. The intake's own `Proof mode` / `Proof approved`
+  body lines are ignored for a flagged command, so a model cannot approve it on your behalf.
 - **Proofs run with a clean environment.** Provider and tool keys are stripped, the same way Hermes's
   terminal tool does it.
 - **`/crew-safety brave` stops the question for good.** It sets Hermes's `approvals.mode: off` in the crew

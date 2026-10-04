@@ -276,6 +276,12 @@ def main():
     for fact in ("id=badge", "<h1>crew board</h1>", "id=cards", "id=live", "id=when", "tailnet"):
         if fact not in page:
             return fail("the header lacks %r" % fact)
+    # The brand mark: our logo with no background, the header's first element (very top left), an
+    # embedded mark (no external asset) linking to the overview (/).
+    if '<header><a class="brand" href="/"' not in page:
+        return fail("the header has no brand mark as its first element (the very top left)")
+    if not re.search(r'<a class="brand" href="/"[^>]*><img src="data:image/svg\+xml;base64,[A-Za-z0-9+/=]+"', page):
+        return fail("the brand mark is not the embedded logo mark with no background")
     if not re.search(r"\d+ cards?<", page) or not re.search(r"(\d+ working now|nothing running)<", page):
         return fail("the header does not state the card count and what is working now")
     why = board_contract(board_data(), "proofs board")

@@ -147,7 +147,7 @@ class ModeTests(SafetyCase):
         self.assertEqual("safe", crew_safety.proof_mode("t_s"))
         self.profile("manual")
         self.assertEqual("safe", crew_safety.proof_mode("t_s"))
-        self.event("t_s", "proof_confirm", {"proof_cmd": "true", "proof_mode": "brave"})
+        self.event("t_s", "proof_confirm", {"proof_cmd": "true", "proof_mode": "brave", "by": "owner"})
         self.assertEqual("brave", crew_safety.proof_mode("t_s"))               # the owner's per-card answer
 
     def test_approvals_mode_off_on_the_coordinator_profile_is_brave_for_every_card(self):
@@ -189,7 +189,8 @@ class VerdictTests(SafetyCase):
         self.snap("t_s", "rm -rf build-output")
         self.assertEqual(crew_card.PROOF_BLOCKED, crew_card.cmd_verdict(self.verdict_args()))
         self.assertEqual([], crew_card.all_verdicts("t_s"))
-        self.event("t_s", "proof_confirm", {"proof_cmd": "rm -rf build-output", "proof_mode": "brave"})
+        self.event("t_s", "proof_confirm", {"proof_cmd": "rm -rf build-output", "proof_mode": "brave",
+                                            "by": "owner"})
         self.assertEqual(0, crew_card.cmd_verdict(self.verdict_args()))         # brave for this card: it ran
         self.assertEqual("PASS", crew_card.all_verdicts("t_s")[-1]["verdict"])
 
@@ -202,16 +203,16 @@ class ApprovedFlaggedTests(SafetyCase):
         self.assertEqual("ok", crew_safety.proof_check("test -f x"))
         self.assertTrue(crew_safety.proof_check("rm -rf /").startswith("hardline: "))
 
-    def test_the_exact_approved_command_runs_in_safe_mode_and_a_different_one_is_blocked(self):
+    def test_a_flagged_command_is_not_approved_by_the_intake_line_but_runs_brave_via_the_owner(self):
         self.card()
         crew_card.finish_card("t_s", {"proof_cmd": self.PY, "proof_approved": True}, "crew-worker",
                               env={"origin": "", "session": "s"}, pinned=True)
-        self.assertEqual("approved", crew_safety.proof_mode("t_s", self.PY))
-        self.assertEqual(0, crew_safety.run_proof(self.PY, None, 20, "approved").rc)
-        other = 'python3 -c "print(2)"'                       # a rescope: same card, other command
-        self.assertEqual("safe", crew_safety.proof_mode("t_s", other))
-        self.assertIn("script execution", crew_safety.run_proof(other, None, 20, "safe").blocked)
-        self.assertEqual("safe", crew_safety.proof_mode("t_s", None))
+        self.assertEqual("safe", crew_safety.proof_mode("t_s", self.PY))     # the body line is ignored when flagged
+        self.assertIn("script execution", crew_safety.run_proof(self.PY, None, 20, "safe").blocked)
+        # the owner's /crew-proof brave is what lets a flagged command run, never the intake body line
+        self.event("t_s", "proof_confirm", {"proof_cmd": self.PY, "proof_mode": "brave", "by": "owner"})
+        self.assertEqual("brave", crew_safety.proof_mode("t_s", self.PY))
+        self.assertEqual(0, crew_safety.run_proof(self.PY, None, 20, "brave").rc)
 
     def test_an_unapproved_card_is_blocked_and_approval_never_passes_the_hardline(self):
         self.card()
@@ -222,7 +223,7 @@ class ApprovedFlaggedTests(SafetyCase):
         crew_card.finish_card("t_h", {"proof_cmd": "rm -rf /", "proof_approved": True}, "crew-worker",
                               env={"origin": "", "session": "s"}, pinned=True)
         mode = crew_safety.proof_mode("t_h", "rm -rf /")
-        self.assertEqual("approved", mode)
+        self.assertEqual("safe", mode)                                       # approval never passes the hardline
         self.assertIn("hardline", crew_safety.run_proof("rm -rf /", None, 20, mode).blocked)
 
     def test_the_intake_line_round_trips_and_a_plan_child_cannot_carry_it(self):
@@ -270,7 +271,8 @@ class AnswerTests(SafetyCase):
         edits = []
         with mock.patch.object(crew_card, "_kanban", lambda a, **k: edits.append(a)), \
                 mock.patch.object(crew_card, "lift_block", return_value={"rc": 0, "status": "ready"}):
-            self.assertEqual(0, crew_card.cmd_proof_answer(argparse.Namespace(card="t_s", yes=True, brave=False)))
+            out = crew_card.owner_proof_answer("t_s", brave=False)
+        self.assertTrue(out.startswith("confirmed proof for t_s"))
         self.assertEqual("test -d .", crew_card.close_proof_command("t_s"))
         self.assertEqual("", crew_card.proof_snapshot_mode("t_s"))
         self.assertIsNone(crew_card.pending_proof_ask("t_s"))
@@ -280,9 +282,10 @@ class AnswerTests(SafetyCase):
         self.card(status="blocked")
         self.snap("t_s", "rm -rf build-output")
         self.ask("t_s", {"kind": "blocked", "command": "rm -rf build-output", "reason": "flagged"})
-        self.assertEqual(1, crew_card.cmd_proof_answer(argparse.Namespace(card="t_s", yes=True, brave=False)))
+        self.assertIn("/crew-proof t_s brave", crew_card.owner_proof_answer("t_s", brave=False))
         with mock.patch.object(crew_card, "lift_block", return_value={"rc": 0, "status": "ready"}):
-            self.assertEqual(0, crew_card.cmd_proof_answer(argparse.Namespace(card="t_s", yes=False, brave=True)))
+            out = crew_card.owner_proof_answer("t_s", brave=True)
+        self.assertTrue(out.startswith("confirmed proof for t_s"))
         self.assertEqual("brave", crew_card.proof_snapshot_mode("t_s"))
         self.assertEqual("rm -rf build-output", crew_card.close_proof_command("t_s"))
 
@@ -292,7 +295,7 @@ class AnswerTests(SafetyCase):
         self.ask("t_s", {"kind": "rescope", "proposed": "touch pwned"})
         for var in ("HERMES_KANBAN_TASK", "CREW_COORDINATOR_TURN"):
             with mock.patch.dict(os.environ, {var: "1"}):
-                self.assertEqual(4, crew_card.cmd_proof_answer(argparse.Namespace(card="t_s", yes=True, brave=True)))
+                self.assertIn("refused", crew_card.owner_proof_answer("t_s", brave=True))
         self.assertEqual("true", crew_card.close_proof_command("t_s"))
 
 

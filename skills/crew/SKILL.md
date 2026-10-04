@@ -140,7 +140,6 @@ Inputs: <paths or URLs the owner gave; quoted text under the line; omit when non
 Done when: <end state>
 proof command: <one shell command>
 Proof mode: <safe|brave>
-Proof approved: yes
 Units: <unit one>|<unit two>
 """)
 ```
@@ -175,11 +174,11 @@ Before the safety question, run `python3 "$HERMES_HOME/plugins/crew/scripts/crew
 - `ok`: nothing more to ask.
 - `hardline: <reason>`: this command can never run in any mode. Say so in one line and ask the owner for a
   different proof. Do not open the card with it.
-- `flagged: <reason>`: when the safety mode is `brave`, or the owner chose `Proof mode: brave`, ignore
-  it. Otherwise (safe) ask through `clarify` in the same batch: question "Hermes flags this proof (<reason>). Run
-  it anyway for this card?", choices "Yes, run it for this card" / "No, use a different proof". An owner yes -> write `Proof approved: yes` (leave the line out otherwise). No -> ask for a
-  different proof (run proof-check again on it). No answer is not a yes. The approval covers exactly that
-  command: a different proof command needs a new question.
+- `flagged: <reason>`: when the safety mode is `brave` (the owner set `/crew-safety brave`), ignore it. Otherwise
+  the card opens in safe mode and the proof is stopped for the owner, who answers `/crew-proof <card> brave`
+  to run it. Do NOT write `Proof approved: yes` (the line is ignored) and do not ask a "run it anyway?" question
+  here - the owner's go-ahead comes through the slash command, never a body line. Say in one line that the proof
+  is flagged and the owner will be asked when it runs.
 
 One line per field. The plugin adds what you cannot know - Coordinator, Verifier, the chat `Origin:` the
 ending is reported into, the budget floor, the role's assignee and skill - and records your `/crew`
@@ -187,7 +186,8 @@ message as the brief the card view draws above the coordinator. Write `Units:` o
 than one deliverable (the writer marks each as it lands); leave it out otherwise.
 
 When `kanban_create` returns the card id, start the watcher, then reply with EXACTLY these two lines and end
-the turn - no "Me:/You:" list, no recap of the contract, no other text:
+the turn - no "Me:/You:" list, no recap of the contract, no other text beyond the `HERMES.CREW v…`
+line the plugin asks for at the top of the turn:
 
 ```
 terminal(background=true, notify_on_complete=true, command='python3 "$HERMES_HOME/plugins/crew/scripts/crew_card.py" watch --card <id>')
@@ -216,7 +216,8 @@ instead (at most 6 children, never two writers on one artifact; the tool refuses
   that blocks or fails (mechanical fixes, then one decision; the owner is asked only when it needs them).
 - Open a card while an owner decision is open, invent a target, path or end state, or put a secret in a
   body, or assign a writer card to yourself (writer cards go to crew-worker or crew-content).
-- Write `Proof approved: yes` the owner did not say yes to, or for a command other than the one it was asked about.
+- Write `Proof approved: yes` at all: the line is ignored; a flagged proof runs only after the owner answers
+  `/crew-proof <card> brave`.
 - Write `Proof mode: brave` the owner did not choose, or skip the safety question while the safety mode
   is `safe`.
 - Open the card in discuss mode before the owner's explicit go, put a script's text in the card, or write more than

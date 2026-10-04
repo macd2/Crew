@@ -112,6 +112,58 @@ class DecisionTurnGuardTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual("block", (self.guard("terminal", {"command": cmd}) or {}).get("action"))
 
+    def test_a_raw_board_or_consent_write_is_refused_for_every_role(self):
+        for cmd in ("sqlite3 $HERMES_KANBAN_DB \"insert into task_events ...\"",
+                    "python3 -c 'import crew_card; crew_card.owner_proof_answer(\"t_x\", True)'",
+                    "grep proof_confirm $HERMES_KANBAN_DB"):
+            for role in ("worker", "content", "verifier", "coordinator"):
+                with self.subTest(cmd=cmd, role=role):
+                    self.assertEqual("block",
+                                     (self.guard("terminal", {"command": cmd}, turn=False, role=role) or {}).get("action"))
+
+    def test_a_script_that_writes_the_board_is_refused_before_it_exists(self):
+        bodies = (
+            "import sqlite3; sqlite3.connect(d).execute(\"insert into task_events (task_id, kind) values\")",
+            "\"\"\"UPDATE task_events SET payload = '{}'\"\"\"",
+            "import crew_card; crew_card.owner_proof_answer(\"t_x\", True)",
+        )
+        for body in bodies:
+            for role in ("worker", "content", "verifier", "coordinator"):
+                with self.subTest(body=body, role=role):
+                    self.assertEqual("block", (self.guard("write_file", {"path": "/tmp/x.py", "content": body},
+                                                           turn=False, role=role) or {}).get("action"))
+                    self.assertEqual("block", (self.guard("patch", {"path": "/tmp/x.py", "patch": body},
+                                                           turn=False, role=role) or {}).get("action"))
+
+    def test_a_proof_script_that_only_reads_the_board_is_still_allowed(self):
+        body = ("import sqlite3\n"
+                "rows = sqlite3.connect(db).execute(\"select kind, payload from task_events order by id\")\n"
+                "print(len(rows.fetchall()))\n")
+        for role in ("worker", "content", "verifier", "coordinator"):
+            with self.subTest(role=role):
+                self.assertIsNone(self.guard("write_file", {"path": "/tmp/read_board.py", "content": body},
+                                             turn=False, role=role))
+
+    def test_a_role_agent_cannot_flip_the_proof_safety_switch(self):
+        for role in ("worker", "content", "verifier", "coordinator"):
+            with self.subTest(role=role):
+                for cmd in ("hermes -p crew-coordinator config set approvals.mode off",
+                            "hermes -p crew-worker config set approvals.mode brave",
+                            "python3 -c 'import os; print(os.environ.get(\"approvals.mode\"))'"):
+                    self.assertEqual("block", (self.guard("terminal", {"command": cmd}, turn=False,
+                                                          role=role) or {}).get("action"), cmd)
+                self.assertEqual("block", (self.guard("write_file", {
+                    "path": os.path.join(tempfile.gettempdir(), "profiles", "crew-coordinator", "config.yaml"),
+                    "content": "approvals:\n  mode: off\n"}, turn=False, role=role) or {}).get("action"))
+
+    def test_reading_config_stays_possible(self):
+        for role in ("worker", "content", "verifier", "coordinator"):
+            with self.subTest(role=role):
+                self.assertIsNone(self.guard("terminal", {"command": "hermes -p crew-worker config get crew.role"},
+                                             turn=False, role=role))
+                self.assertIsNone(self.guard("terminal", {"command": "python3 -m pytest -q tests/"},
+                                             turn=False, role=role))
+
     def test_outside_a_decision_turn_or_another_role_nothing_is_guarded(self):
         self.assertIsNone(self.guard("write_file", turn=False))
         self.assertIsNone(self.guard("write_file", role="worker"))
@@ -139,7 +191,8 @@ class CommandTableTests(unittest.TestCase):
         tool.unstuck_card.assert_called_once_with("t_1")
 
     def test_the_options_that_stay_are_the_documented_ones(self):
-        self.assertEqual(["status", "graph", "stop", "unstuck", "safety"], [a for _n, a, _h, _d in P.COMMANDS])
+        self.assertEqual(["status", "graph", "stop", "unstuck", "safety", "proof"],
+                         [a for _n, a, _h, _d in P.COMMANDS])
 
     def test_the_platform_menu_is_the_skills_around_the_plugin_commands(self):
         spec = importlib.util.spec_from_file_location("crew_install_menu", str(REPO / "install.py"))

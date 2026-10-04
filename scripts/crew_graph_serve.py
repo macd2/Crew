@@ -408,7 +408,7 @@ def board_page(include_all=False, nonce=None):
             # answers the poll, amber once a poll fails), the card count, how many are working now,
             # the status counts, when it last updated, the bell and the board's own link (crew_card.dashboard_url). The counts are
             # server-rendered so the page reads right before any script; a failed poll shows "stale since".
-            "<header><span class=badge id=badge title='the board server answers'><i></i>LIVE</span><h1>crew board</h1>"
+            "<header>%s<span class=badge id=badge title='the board server answers'><i></i>LIVE</span><h1>crew board</h1>"
             "<span class=meta id=cards>%s</span><span class=meta id=live>%s</span>"
             "<div class=stats id=counts>%s</div>"
             "<span class=meta id=when></span><span class=stale id=stale hidden></span>"
@@ -424,7 +424,7 @@ def board_page(include_all=False, nonce=None):
             # to come after them: a `draw(INIT)` placed before board.js ran with no helpers defined
             # yet, and the thrown error left the board empty.
             "<script%s>var INIT=%s;%s;draw(INIT);</script></body></html>"
-            % (CG.favicon_link(), css, cards_word(data.get("cards")), live_word(data.get("live")),
+            % (CG.favicon_link(), css, CG.logo_link(), cards_word(data.get("cards")), live_word(data.get("live")),
                board_counts(data.get("counts")), notes_hint(data.get("attention")),
                BELL_SVG, notes_total(data.get("attention")), attention_head(data.get("attention")),
                esc(os.uname().nodename), esc(CG.crew_card.dashboard_url()),

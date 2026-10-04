@@ -73,7 +73,8 @@ def main():
                          "workspace_kind) values (?,?,?,?,'blocked',0,?,?,'scratch')",
                          (cid, "probe skip %s" % cid, "Role: worker\nGoal: probe\n", crew_card.FIXTURE_ASSIGNEE,
                           owner, now))
-            for kind, payload in (("proof_confirm", {"proof_cmd": PROOF_CMD}), ("blocked", {"reason": "probe"})):
+            for kind, payload in (("proof_confirm", {"proof_cmd": PROOF_CMD, "by": "owner"}),
+                                  ("blocked", {"reason": "probe"})):
                 conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
                              "values (?, NULL, ?, ?, ?)", (cid, kind, json.dumps(payload), now))
         conn.commit()

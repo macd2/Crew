@@ -36,7 +36,7 @@ PLUGIN = os.path.join(PROFILE, "plugins", "crew", "__init__.py")
 # set; the proof does the same, or it would run whatever crew copy the base home holds.
 os.environ.setdefault("HERMES_HOME", PROFILE)
 MANIFEST = os.path.join(PROFILE, "plugins", "crew", "plugin.yaml")
-OPTIONS = ["status", "graph", "stop", "unstuck", "safety"]
+OPTIONS = ["status", "graph", "stop", "unstuck", "safety", "proof"]
 # The commands the owner surface no longer has. None may be registered, and the usage text names none.
 REMOVED = ["crew-run", "crew-verify", "crew-roles", "crew-install", "crew-ops", "crew-unblock", "crew-unstale",
            "crew-heal", "crew-triage"]

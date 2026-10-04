@@ -324,8 +324,9 @@ def contract_proof_mode(body):
 
 
 def contract_proof_approved(body):
-    """The intake's `Proof approved: yes` line: the owner said yes to running this exact, Hermes-flagged proof
-    command. Read once at card creation; crew_safety binds it to the command's hash in the snapshot."""
+    """The intake's `Proof approved: yes` line. It is read for the contract round-trip only: `finish_card` ignores
+    it for a flagged command, so it never binds a hash to the snapshot - a flagged proof runs only after the
+    owner answers `/crew-proof <card> brave`."""
     return (field(body, "Proof approved") or "").strip().lower() in ("yes", "true")
 
 
@@ -1201,9 +1202,17 @@ def finish_card(card_id, c, assignee, env=None, pick=None, pinned=False):
     if pick:
         apply_route(card_id, pick, pin=not pinned)
         res["route"] = pick
+    # The intake's `Proof mode:` / `Proof approved:` lines are model-written, so they are honoured only when the
+    # command would not be flagged in safe mode. A flagged command records no consent here: it runs only through
+    # the owner's /crew-proof answer. This is what stops a prompt-injected intake from writing brave or an approval.
+    proof_mode = c.get("proof_mode")
+    proof_approved = bool(c.get("proof_approved"))
+    if (proof_mode == "brave" or proof_approved) and c.get("proof_cmd"):
+        if not crew_safety.check_proof(c.get("proof_cmd"), "safe")[0]:
+            proof_mode, proof_approved = None, False
     record_origin(card_id, env=env, note=c.get("title") or c.get("goal") or "",
-                  proof_cmd=c.get("proof_cmd") or "", proof_mode=c.get("proof_mode"),
-                  proof_approved=bool(c.get("proof_approved")))
+                  proof_cmd=c.get("proof_cmd") or "", proof_mode=proof_mode,
+                  proof_approved=proof_approved)
     if c.get("brief"):
         res["brief_recorded"] = record_brief(card_id, c["brief"], source=c.get("brief_source") or "owner",
                                              origin=c.get("origin"))
@@ -1400,12 +1409,13 @@ def needs_pass(body):
 
 
 SNAPSHOT_KINDS = ("origin", "proof_confirm", "proof_script_hash")
+OWNER_BY = "owner"    # a proof_confirm written by the owner's /crew-proof answer: the only consent the snapshot trusts
 
 
 def snapshot_events(card_id, db=None):
-    """The card's snapshot events, oldest first, as payload dicts: the `origin` written when it opened and any
-    `proof_confirm` added since: the owner's answer (`proof-answer`), or the plan's own close-out card. A separate
-    kind, not a second `origin`: origin events are the chat/session record (origin_of, crew_notify) and stay as written.
+    """The card's snapshot events, oldest first, as (kind, payload) pairs: the `origin` written when it opened and any
+    `proof_confirm` added since (the owner's /crew-proof answer, or the plan's own close-out card). A separate kind,
+    not a second `origin`: origin events are the chat/session record (origin_of, crew_notify) and stay as written.
     `proof_script_hash` rides here too (the scripts a proof ran, see proof_script_hashes). `db` reads another board."""
     db = db or kanban_db()
     if not db:
@@ -1414,21 +1424,36 @@ def snapshot_events(card_id, db=None):
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
         try:
-            rows = conn.execute("select payload from task_events where task_id = ? and kind in (%s) order by id"
+            rows = conn.execute("select kind, payload from task_events where task_id = ? and kind in (%s) order by id"
                                 % marks, (card_id,) + SNAPSHOT_KINDS).fetchall()
         finally:
             conn.close()
     except Exception:
         return []
     out = []
-    for (payload,) in rows:
+    for kind, payload in rows:
         try:
             data = json.loads(payload or "{}")
         except ValueError:
             continue
         if isinstance(data, dict):
-            out.append(data)
+            out.append((kind, data))
     return out
+
+
+def _snapshot_trusts(kind, data):
+    """May a snapshot event's `proof_cmd` be the card's snapshot? `origin` (the intake at open), the owner's
+    /crew-proof answer, or crew code carrying an already-owner-confirmed command (the plan's close-out card)."""
+    return kind == "origin" or (kind == "proof_confirm" and
+                                (data.get("by") == OWNER_BY
+                                 or (data.get("by") == "crew" and data.get("note") == "close-out")))
+
+
+def _consent_trusts(kind, data):
+    """May a snapshot event carry the owner's consent (`proof_mode` / `approved_flagged`)? Only `origin` (the
+    intake, itself gated so a flagged command records no consent) or the owner's /crew-proof answer. A
+    proof_confirm written by anything else - a raw sqlite insert, the plan's close-out carry - is never consent."""
+    return kind == "origin" or (kind == "proof_confirm" and data.get("by") == OWNER_BY)
 
 
 def proof_snapshot(card_id, db=None):
@@ -1439,23 +1464,24 @@ def proof_snapshot(card_id, db=None):
     anyone can edit, and a coordinator `rescope` is a model's proposal: neither can change what runs. A new
     command becomes the snapshot only through the owner's answer (a `proof_confirm` event)."""
     snap = None
-    for data in snapshot_events(card_id, db):
-        if "proof_cmd" in data:
+    for kind, data in snapshot_events(card_id, db):
+        if "proof_cmd" in data and _snapshot_trusts(kind, data):
             snap = str(data["proof_cmd"] or "").strip()
     return snap
 
 
 def proof_snapshot_mode(card_id):
     """The per-card safety mode the owner chose ("safe", "brave"), newest first, or ''."""
-    for data in reversed(snapshot_events(card_id)):
-        if data.get("proof_mode") in PROOF_MODES:
+    for kind, data in reversed(snapshot_events(card_id)):
+        if data.get("proof_mode") in PROOF_MODES and _consent_trusts(kind, data):
             return data["proof_mode"]
     return ""
 
 
 def proof_snapshot_approved(card_id):
     """Hashes of the flagged commands the owner approved for this card (see crew_safety.cmd_hash)."""
-    return {d["approved_flagged"] for d in snapshot_events(card_id) if d.get("approved_flagged")}
+    return {d["approved_flagged"] for kind, d in snapshot_events(card_id)
+            if d.get("approved_flagged") and _consent_trusts(kind, d)}
 
 
 def close_proof_command(card_id, db=None):
@@ -1475,7 +1501,7 @@ def proof_script_hashes(card_id):
     with its reason, or has the verifier rewrite the script (authorize_script_revision, send_to_verifier). The owner
     is never asked."""
     out = {}
-    for data in snapshot_events(card_id):
+    for kind, data in snapshot_events(card_id):
         if isinstance(data.get("script_hashes"), dict):
             out.update(data["script_hashes"])
     return out
@@ -1559,7 +1585,7 @@ def send_to_verifier(card_id, summary):
 def pending_script_authorization(card_id):
     """The reason of an authorization no later hash record has used up, else ''."""
     why = ""
-    for data in snapshot_events(card_id):
+    for kind, data in snapshot_events(card_id):
         if data.get("authorizes"):
             why = str(data["authorizes"])
         elif isinstance(data.get("script_hashes"), dict):
@@ -1569,7 +1595,7 @@ def pending_script_authorization(card_id):
 
 def script_revisions(card_id, db=None):
     """The reasons proof scripts of this card were revised, oldest first (a revision record carries a `why`)."""
-    return [str(d["why"]) for d in snapshot_events(card_id, db) if d.get("why") and d.get("script_hashes")]
+    return [str(d["why"]) for kind, d in snapshot_events(card_id, db) if d.get("why") and d.get("script_hashes")]
 
 
 def carry_script_hashes(src_card, dst_card):
@@ -1866,7 +1892,8 @@ def rewrite_line(body, label, value):
 def pending_proof_ask(card_id):
     """The proof question the owner has not answered, or None: the newest `ask_owner` decision that carries a
     `proof_ask` ({kind: "rescope", proposed} or {kind: "blocked", command, reason}), unless a `proof_confirm`
-    came after it. The coordinator writes it (crew_coordinator.ask_proof), `proof-answer` closes it."""
+    written by the owner came after it. The coordinator writes it (crew_coordinator.ask_proof),
+    the owner's /crew-proof answer closes it."""
     db = kanban_db()
     if not db:
         return None
@@ -1878,46 +1905,41 @@ def pending_proof_ask(card_id):
             data = json.loads(payload or "{}")
         except ValueError:
             continue
-        if kind == "proof_confirm":
+        if kind == "proof_confirm" and isinstance(data, dict) and data.get("by") == OWNER_BY:
             ask = None
         elif isinstance(data, dict) and data.get("decision") == "ask_owner" and isinstance(data.get("proof_ask"), dict):
             ask = data["proof_ask"]
     return ask
 
 
-def cmd_proof_answer(args):
-    """The owner's answer to the coordinator's proof question: the one way a proof command other than the opening
-    one, or a flagged one, ever runs. Refused inside any agent run (a worker, the verifier, the coordinator's
-    turn): only the owner's own session or terminal answers, never the model whose proposal it is."""
+def owner_proof_answer(card_id, brave=False):
+    """The owner's answer to the coordinator's proof question, through /crew-proof: the ONE way a proof command
+    other than the opening one, or a flagged one, ever runs. Refused inside any agent run (a worker, the verifier,
+    the coordinator's turn): only the owner's own /crew-proof answer counts, never the model whose proposal it is."""
     if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("CREW_COORDINATOR_TURN"):
-        print("refused: a proof question is answered by the owner, not from inside a card's run")
-        return 4
-    ask = pending_proof_ask(args.card)
+        return "refused: a proof question is answered by the owner (/crew-proof), not from inside a card's run"
+    ask = pending_proof_ask(card_id)
     if not ask:
-        print("no open proof question on %s" % args.card)
-        return 1
+        return "no open proof question on %s" % card_id
     if ask.get("kind") == "rescope":
         cmd = str(ask.get("proposed") or "").strip()
-    elif args.brave:
-        cmd = close_proof_command(args.card)
+    elif brave:
+        cmd = close_proof_command(card_id)
     else:
-        print("this proof was blocked by Hermes safety: answer --brave to run it for this card, or ask the "
-              "coordinator for a different proof")
-        return 1
+        return ("this proof was blocked by Hermes safety: answer `/crew-proof %s brave` to run it for this card, "
+                "or ask the coordinator for a different proof" % card_id)
     if not cmd:
-        print("nothing to confirm: the question carries no proof command")
-        return 1
-    payload = {"proof_cmd": cmd, "by": "owner", "ts": time.time()}
-    if args.brave:
+        return "nothing to confirm: the question carries no proof command"
+    payload = {"proof_cmd": cmd, "by": OWNER_BY, "ts": time.time()}
+    if brave:
         payload["proof_mode"] = "brave"
-    _append_card_event(args.card, "proof_confirm", payload)
-    row = card_row(args.card)
+    _append_card_event(card_id, "proof_confirm", payload)
+    row = card_row(card_id)
     if ask.get("kind") == "rescope" and row:
-        _kanban(["edit", args.card, "--body", rewrite_line(row[4], "proof command", cmd)])
-    res = lift_block(args.card)
-    print("confirmed proof for %s: %s%s; card %s" % (args.card, cmd[:120], " (brave)" if args.brave else "",
-                                                     res.get("status") or "not blocked"))
-    return 0
+        _kanban(["edit", card_id, "--body", rewrite_line(row[4], "proof command", cmd)])
+    res = lift_block(card_id)
+    return ("confirmed proof for %s: %s%s; card %s" % (card_id, cmd[:120], " (brave)" if brave else "",
+                                                       res.get("status") or "not blocked"))
 
 
 def ledger_files(card_id):
@@ -2453,10 +2475,6 @@ def main():
                                        "role's later turns; use this, never edit a skill")
     le.add_argument("--role", required=True, help="worker, content, verifier, coordinator or all (comma list)")
     le.add_argument("--text", required=True, help="one or two lines")
-    pa = sub.add_parser("proof-answer", help="the owner's answer to a proof question on a card")
-    pa.add_argument("--card", required=True)
-    pa.add_argument("--yes", action="store_true", help="accept the proposed proof command")
-    pa.add_argument("--brave", action="store_true", help="run it without Hermes's dangerous-command check")
     args = ap.parse_args()
 
     try:
@@ -2539,8 +2557,6 @@ def main():
         if args.cmd == "lesson":
             import crew_lessons
             return crew_lessons.main(["add", "--role", args.role, "--text", args.text])
-        if args.cmd == "proof-answer":
-            return cmd_proof_answer(args)
         if args.cmd == "stats":
             return cmd_stats(args)
     except ValueError as exc:

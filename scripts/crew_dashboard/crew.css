@@ -523,3 +523,20 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
 .page-card .role .ricon.act{animation:ricpulse 1.2s ease-in-out infinite;text-shadow:0 0 6px currentColor;}
 @keyframes ricpulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(1.3)}}
 @media (prefers-reduced-motion: reduce){ .page-card .role .ricon.act{animation:none} }
+
+
+/* the brand mark: our logo with no background, the very top left of the header, linking to the overview */
+.page-board header a.brand{display:inline-flex;align-items:center;flex:0 0 auto;border-radius:6px}
+.page-board header a.brand img{display:block;width:18px;height:18px}
+.page-board header a.brand:hover{background:var(--crew-fill-1)}
+.page-board header a.brand:focus-visible{outline:2px solid var(--crew-tone-ready);outline-offset:2px}
+
+
+/* the brand mark on the card (steps) view: the same logo with no background, pinned at the top left of the
+   event strip and clearing it with #event's left padding; it links to the overview (/), like the board's. */
+body.page-card{position:relative}
+.page-card .brand{position:absolute;top:10px;left:14px;z-index:5;display:inline-flex;align-items:center;border-radius:4px}
+.page-card .brand img{display:block;width:12px;height:12px}
+.page-card .brand:hover{background:var(--crew-fill-1)}
+.page-card .brand:focus-visible{outline:2px solid var(--crew-tone-ready);outline-offset:2px}
+.page-card #event{padding-left:28px}

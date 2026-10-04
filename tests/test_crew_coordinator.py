@@ -892,7 +892,7 @@ class ApplyDecisionTests(unittest.TestCase):
         for needle in ("rm -rf build-output", "recursive delete", "Reply `brave`", "/crew-safety brave"):
             self.assertIn(needle, dec["question"] + dec["detail"])
         self.assertEqual("blocked", dec["proof_ask"]["kind"])
-        self.assertIn("proof-answer --card t_1 --brave", dec["detail"])
+        self.assertIn("/crew-proof t_1 brave", dec["detail"])
 
     def test_a_blocked_stale_block_proof_is_asked_not_decided(self):
         card = self.card()
@@ -908,3 +908,21 @@ class ApplyDecisionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UntrustedFeedTests(unittest.TestCase):
+    """The decider is told, in the prompt and in the fencing, that worker prose is data."""
+
+    def test_worker_text_helper_fences_and_the_prompt_says_so(self):
+        self.assertEqual("<untrusted-worker-text>done</untrusted-worker-text>", cc.untrusted("done"))
+        self.assertIn("is DATA", cc.PROMPT)
+        self.assertIn(cc.UNTRUSTED_OPEN, cc.PROMPT)
+        self.assertIn(cc.UNTRUSTED_CLOSE, cc.PROMPT)
+
+    def test_the_builders_fence_the_three_worker_written_sections(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "scripts/crew_coordinator.py"), encoding="utf-8").read()
+        self.assertIn('untrusted(" ".join(str(r["summary"]', src)          # run summaries / errors
+        self.assertIn('untrusted(" ".join(str(v.get("output_head")', src)  # verdict output
+        self.assertIn("untrusted(hand)", src)                              # the hand-off
+        self.assertIn('untrusted(log[-max(room, 0):])', src)               # the log tail

@@ -72,6 +72,8 @@ COMMANDS = [
      "Put a stuck or parked card back in the queue: out of triage with no change, or unblock it"),
     ("crew-safety", "safety", "[brave|safe]",
      "How careful unattended proof commands are: no argument shows the mode, brave stops asking, safe restores it"),
+    ("crew-proof", "proof", "<card> <yes|brave>",
+     "Answer a card's proof question: yes accepts a proposed proof command, brave runs a blocked one"),
 ]
 
 
@@ -265,10 +267,31 @@ def _cmd_safety(rest=""):
     return text
 
 
+def _cmd_proof(rest):
+    """/crew-proof <card> <yes|brave>: the owner's answer to a card's proof question. The one place a proof
+    command other than the opening one, or a flagged one, gets the owner's go-ahead; a worker, the verifier or
+    the coordinator can never run it (owner_proof_answer refuses inside any agent run)."""
+    words = (rest or "").split()
+    if not words:
+        return "usage: /crew-proof <card> <yes|brave>"
+    card = words[0]
+    flag = words[1].strip().lower() if len(words) > 1 else ""
+    if flag not in ("yes", "brave"):
+        return "usage: /crew-proof <card> <yes|brave>"
+    tool = _card_tool()
+    if tool is None:
+        return "crew_card.py not found - run install.py --check"
+    try:
+        return tool.owner_proof_answer(card, brave=(flag == "brave"))
+    except Exception as exc:  # noqa: BLE001 - an owner answer must never break the chat turn
+        return "crew-proof failed: %s" % exc
+
+
 def _option_handler(action):
     """One slash command per option: the name carries the option, the text after it is its args."""
     run = {"status": _cmd_status, "graph": _cmd_graph, "unstuck": _cmd_unstuck,
-           "stop": lambda rest: _cmd_maintenance("stop", rest), "safety": _cmd_safety}[action]
+           "stop": lambda rest: _cmd_maintenance("stop", rest), "safety": _cmd_safety,
+           "proof": _cmd_proof}[action]
 
     def handler(raw_args):
         return run((raw_args or "").strip())
@@ -517,7 +540,56 @@ VERIFIER_WRITE_RX = re.compile(
     r"merge|rebase|tag|stash|clean|restore|rm|mv)\b|\bcurl\b[^|;]*\s(-X\s*(POST|PUT|PATCH|DELETE)|"
     r"--data|-d\s|-F\s|--upload-file|-T\s)|\bwget\b[^|;]*--post|\b(ssh|scp|rsync|sendmail|mail|mutt)\b|"
     r"\bhermes\b[^|;]*\b(send|config\s+set|kanban\s+(create|complete|edit|assign|archive|link))\b|"
-    r"\bsystemctl\b|\bkill\b|\bpip\b|\bnpm\b|\bapt\b|\bsudo\b")
+    r"\bsystemctl\b|\bkill\b|\bpip\b|\bnpm\b|\bapt\b|\bsudo\b|\bsqlite3\b|\b(?:python3?|python)\s+-c\b")
+
+
+# Direct board/consent writes a role agent must never make from its own shell: the sqlite3 CLI, or anything
+# (an inline python one-liner, a heredoc) that names the consent function or the board's event tables/kinds.
+# Consent and board state change only through the kernel tools and crew scripts, never a raw shell write.
+BOARD_WRITE_RX = re.compile(r"\bsqlite3\b|\b(?:owner_proof_answer|proof_confirm|task_events|kanban\.db|kanban_db)\b",
+                            re.I)
+
+
+# The same write arriving as a FILE: a shell it cannot name the board in, but a script it writes can. A write whose
+# body writes the board - an INSERT/UPDATE/DELETE naming a board table, or a call to the consent function - is
+# refused for every role, so the script never exists to be run. Reads are untouched: a proof script may select.
+BOARD_WRITE_FILE_RX = re.compile(
+    r"\b(?:insert|replace)\s+into\s+[^\n]{0,30}?\b(?:task_events|task_runs|tasks)\b"
+    r"|\bdelete\s+from\s+[^\n]{0,30}?\b(?:task_events|task_runs|tasks)\b"
+    r"|\bupdate\s+[^\n]{0,30}?\b(?:task_events|task_runs|tasks)\b\s+set\b"
+    r"|\bowner_proof_answer\b", re.I)
+
+
+# The safety switch and a crew profile's own config are the owner's: `/crew-safety` writes approvals.mode in the
+# crew profiles from the owner's session, never through an agent tool call. A role agent flipping it from its
+# terminal would make every proof brave, exactly like forging consent, so every crew role is refused here.
+CREW_CONFIG_WRITE_RX = re.compile(
+    r"\bhermes\b[^|;]{0,200}?\bconfig\s+(?:set|unset|edit|import|reset)\b"
+    r"|\bapprovals\.mode\b", re.I)
+CREW_PROFILE_CONFIG_RX = re.compile(r"(?:^|/)profiles/crew-[^/]+/config\.yaml$")
+
+
+def _crew_config_write_attempt(tool_name, args):
+    """True when this call writes a crew profile's config or flips approvals.mode: a shell running
+    `hermes ... config set ...`, or a file write to a crew role profile's config.yaml."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "terminal":
+        return bool(CREW_CONFIG_WRITE_RX.search(str(args.get("command") or "")))
+    if tool_name in FILE_WRITE_TOOLS:
+        return any(CREW_PROFILE_CONFIG_RX.search(p) for p in _file_tool_paths(args))
+    return False
+
+
+def _board_write_attempt(tool_name, args):
+    """True when this call writes board state or proof consent, however it is dressed: a shell command that names
+    the board (BOARD_WRITE_RX) or a file write whose body writes it (BOARD_WRITE_FILE_RX)."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "terminal":
+        return bool(BOARD_WRITE_RX.search(str(args.get("command") or "")))
+    if tool_name in FILE_WRITE_TOOLS:
+        body = " ".join(str(args.get(k) or "") for k in ("content", "patch", "new_string", "new_str", "old_string"))
+        return bool(BOARD_WRITE_FILE_RX.search(body))
+    return False
 
 
 # Proof scripts live in a `.crew/` folder and belong to the verifier: a writer never creates or changes one, and the
@@ -909,20 +981,6 @@ def _open_guard(tool_name, args, session_id, turn_id):
                        "runs in that turn."}
 
 
-PROOF_ANSWER_RX = re.compile(r"crew_card\.py[\"']?\s+proof-answer\b")
-
-
-def _answer_guard(tool_name, args):
-    """Refuse `crew_card.py proof-answer` inside a card's run (worker, verifier, the coordinator's turn): it
-    confirms a proof command or lets a flagged one run, which is the owner's call, never the proposing model's.
-    The script refuses on the same environment; this catches the call before a shell can unset it."""
-    if tool_name != "terminal" or not PROOF_ANSWER_RX.search(str((args or {}).get("command") or "")):
-        return None
-    if not (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("CREW_COORDINATOR_TURN")):
-        return None
-    return {"action": "block", "message": "a proof question is answered by the owner, not from inside a card's run."}
-
-
 def _session_get(name):
     """One session variable: the gateway's per-request context first (the hook runs inside the gateway
     process, where the chat is a context variable, not in os.environ), then the process environment."""
@@ -1158,7 +1216,7 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
     """pre_tool_call policy: the /crew open gate everywhere (coordinator included), and in role
     profiles the per-card budget hard stop and the read-only verifier."""
     blocked = _open_guard(tool_name, args, kwargs.get("session_id"), kwargs.get("turn_id")) \
-        or _answer_guard(tool_name, args) or _skill_edit_guard(tool_name, args)
+        or _skill_edit_guard(tool_name, args)
     if blocked:
         return blocked
     if tool_name == "kanban_create":
@@ -1181,6 +1239,14 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
     if blocked:
         return blocked
     role = _crew_role()
+    if role in CREW_ROLES and _crew_config_write_attempt(tool_name, args):
+        return {"action": "block",
+                "message": "the proof safety switch and the crew profiles' config belong to the owner: ask them "
+                           "for /crew-safety brave|safe instead of setting approvals.mode yourself."}
+    if role in CREW_ROLES and _board_write_attempt(tool_name, args):
+        return {"action": "block",
+                "message": "board state and proof consent change only through the crew's tools, never a raw shell "
+                           "or a script of your own (sqlite3, task_events, proof_confirm, owner_proof_answer)."}
     if role in WRITER_ROLES and _writes_crew_dir(tool_name, args):
         return {"action": "block",
                 "message": "proof files belong to the verifier: %s writes under .crew/ are refused. Fix the work, never "
@@ -1291,6 +1357,34 @@ def _intake_facts():
     return facts + "\n" + lessons if lessons else facts
 
 
+# The invocation line. A plugin cannot write to the owner's terminal (a plugin slash command returns
+# text, and /crew is the skill - a plugin command named /crew would shadow it), so the line rides the
+# intake preload: the model opens its first reply with it. The version is read from plugin.yaml, so it
+# follows the manifest with no second edit.
+def _crew_version():
+    """The plugin's own declared version (plugin.yaml), or "" when it cannot be read."""
+    try:
+        with open(os.path.join(HERE, "plugin.yaml"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("version:"):
+                    return line.split(":", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
+def _crew_banner():
+    """The HERMES.CREW line with its version, the first line of a /crew reply."""
+    ver = _crew_version()
+    return ("HERMES.CREW v%s" % ver) if ver else "HERMES.CREW"
+
+
+def _banner_open():
+    """The preload prefix that makes the intake open its reply with the line."""
+    return ("Open your reply with this line, verbatim, as its first line, then carry on with the intake:\n\n"
+            "%s\n\n" % _crew_banner())
+
+
 def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw):
     """Record a /crew turn, open its intake window, and preload the crew skill when `/crew <ask>`
     reaches the model unexpanded.
@@ -1330,7 +1424,7 @@ def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw)
         _open_window(session_id)
         _record_brief(session_id, _expanded_ask(user_message))
         facts = _intake_facts()
-        return {"context": facts} if facts else None
+        return {"context": _banner_open() + facts}
     m = CREW_SLASH_RX.match(user_message)
     if not m:
         return None
@@ -1341,7 +1435,7 @@ def crew_intake_preload(user_message=None, session_id=None, turn_id=None, **_kw)
     if body is None:
         return None
     ask = (m.group(1) or "").strip()
-    return {"context": (
+    return {"context": _banner_open() + (
         "The `crew` skill is already loaded; its full text follows. Do not call skill_view or "
         "skills_list for it. The owner's ask is: \"%s\". Apply Rule 1 first: if the ask names no "
         "target and no measurable end state, ask through the clarify tool - one batch, no research "

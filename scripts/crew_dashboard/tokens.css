@@ -2,6 +2,10 @@
    surface, stroke and text step is the foreground at an alpha, the way the Hermes desktop builds its
    own ladder. A host that defines --color-* (web dashboard) or --dt-* (desktop) re-skins both pages. */
 :root{
+  /* The page's own scheme, so an embedded mark (the header logo, the tab icon) picks the ink that reads on
+     THIS field, not the one the viewer's OS prefers: a black-ring mark on a dark page is an invisible mark.
+     The dashboard's field is dark; a light host sets --crew-scheme:light with its --color-* / --dt-* tokens. */
+  color-scheme: var(--crew-scheme, dark);
   --crew-bg: var(--color-background, var(--dt-background, #0f1115));
   --crew-fg: var(--color-foreground, var(--ui-base, #e8eaed));
   --crew-font: var(--dt-font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);

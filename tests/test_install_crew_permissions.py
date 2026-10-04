@@ -344,7 +344,7 @@ class MenuPriorityTests(unittest.TestCase):
         cfg.seed("p", **{dotted + "_mode": "prepend", dotted: "[crew,crew-status,crew-run,crew-verify]"})
         status, detail = CI.step_menu_priority("p", False, True)
         self.assertEqual("CHANGED", status, detail)
-        self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-diagnose"], CI.CREW_MENU_ORDER)
+        self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-proof", "crew-diagnose"], CI.CREW_MENU_ORDER)
         self.assertFalse([c for c in cfg.calls if c[1:3] == ("config", "set")], "--check writes nothing")
         self.assertEqual("CHANGED", CI.step_menu_priority("p", True, True)[0])
         self.assertEqual("OK", CI.step_menu_priority("p", False, True)[0])

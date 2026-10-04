@@ -60,7 +60,11 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_card  # noqa: E402
 
-KANBAN_DB = os.environ.get("KANBAN_DB", os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db"))
+# The board this acts on: the same resolution the rest of the crew uses (crew_card.kanban_db: a pinned
+# HERMES_KANBAN_DB / KANBAN_DB, else the board under this HERMES_HOME). A hard-coded ~/.hermes/kanban.db ignored
+# a routed profile and a non-default board, so stop could park cards on the wrong one.
+KANBAN_DB = (crew_card.kanban_db() or os.environ.get("KANBAN_DB") or os.environ.get("HERMES_KANBAN_DB")
+             or os.path.join(crew_card.base_home(), "kanban.db"))
 # A card in one of these is still somebody's work in progress; done and archived are not.
 OPEN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "review")
 CLOSED_STATUSES = ("done", "archived")
