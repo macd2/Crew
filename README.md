@@ -50,7 +50,7 @@ Requires Hermes Agent with the kanban board, and Python 3.11+.
 
 ```sh
 # 1. get the plugin
-hermes plugins install macd2/crew
+hermes plugins install macd2/Crew
 
 # 2. set it up for your chat profile (role profiles, the dashboard service)
 python3 ~/.hermes/plugins/crew/install.py --profile NAME

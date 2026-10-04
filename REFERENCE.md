@@ -56,10 +56,11 @@ run at any time.
 
 ## Commands
 
-Seven entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
+Eight entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
 command's handler can only return text and cannot start a turn, so a pass that needs the model is a
-skill. `/crew-status`, `/crew-graph`, `/crew-stop`, `/crew-unstuck` and `/crew-safety` are plugin commands, deterministic and free of any model
-call: the option is in the command name, so `/help` and the platform command menus list exactly these seven.
+skill. `/crew-status`, `/crew-graph`, `/crew-stop`, `/crew-unstuck`, `/crew-safety` and
+`/crew-proof` are plugin commands, deterministic and free of any model call: the option is in the command
+name, so `/help` and the platform command menus list exactly these eight.
 Everything else the owner once typed is gone: the coordinator loop heals, retries and asks, and the install
 and role checks are `python3 install.py --check [--profile NAME]` (`hermes plugins doctor crew` only validates
 that the plugin loads and registers; it reports nothing about roles, crons or profile drift).
@@ -96,6 +97,11 @@ that the plugin loads and registers; it reports nothing about roles, crons or pr
                            no change (the kernel's `specify_triage_task`), or `hermes kanban unblock` (also how a parked card continues, with its whole history)
 - `/crew-safety [brave|safe]`  no argument shows the proof safety mode; `brave` sets `approvals.mode: off`
                            in the crew role profiles, `safe` restores what each had before
+- `/crew-proof <card id> <yes|brave>`  the owner's answer to a proof question: `yes` accepts the proof command
+                           the coordinator proposed, `brave` runs a proof Hermes flagged as dangerous. It is the
+                           only route that records consent - the snapshot trusts a `proof_confirm` event with
+                           `by=owner`, and only this command writes one, so a card's own run can never answer
+                           its own proof question (the old `proof-answer` CLI is gone)
 - `/crew-diagnose [state]`  the read-only pass (a skill, so it runs in this session's own turn): every
                            card sitting in that state (`blocked` when none is named) with its id, kind,
                            wait and reason, then how each would resume and who takes that step. It

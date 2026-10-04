@@ -1,7 +1,7 @@
 ---
 name: crew
 description: "Crew intake: /crew <ask> - the coordinator checks the ask critically, asks what is missing, then opens one contract card and hands it over."
-version: 0.6.0
+version: 0.7.8
 ---
 
 # /crew - coordinator intake
