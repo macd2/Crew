@@ -94,8 +94,10 @@ def resolve_profile_home(name):
 
 
 def profile_flag(name):
+    # "default" is named explicitly: with no -p, hermes acts on the *sticky* profile (`hermes profile use`),
+    # so a bare `hermes config set` meant for the default home landed in whichever profile was sticky instead.
     name = (name or "").strip()
-    return [] if not name or name == "default" else ["-p", name]
+    return [] if not name else ["-p", name]
 
 
 def h(profile, *args):
@@ -992,6 +994,11 @@ def step_skills(profile_home, apply):
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 NO_BUNDLED_SKILLS_TEXT = ("A crew role profile carries only skills/crew/ and its skills_extra; the installer\n"
                           "wrote this so `hermes update` does not re-seed the bundled skills.\n")
+# What Hermes itself keeps in an opted-out profile's skills dir, so trimming it would only start a fight with
+# every `hermes update`: the essential skill it seeds even under the marker (tools/skills_sync.py ESSENTIAL_SKILLS)
+# and its own sync/curator records. Measured 2026-10-06: trimmed role profiles were re-seeded within the hour.
+HERMES_KEPT_SKILLS = ("autonomous-ai-agents/hermes-agent",)
+HERMES_KEPT_FILES = (".bundled_manifest", ".curator_state")
 
 
 def _extras_clean(extras):
@@ -1005,13 +1012,15 @@ def _skills_excess(home, extras):
     root = os.path.join(home, "skills")
     if not os.path.isdir(root) or os.path.islink(root):
         return []
-    keep = set(_extras_clean(extras))
+    # A kept skill's category carries a DESCRIPTION.md that Hermes's sync writes next to it.
+    keep = set(_extras_clean(extras)) | set(HERMES_KEPT_SKILLS)
+    keep |= {k.split("/")[0] + "/DESCRIPTION.md" for k in keep if "/" in k}
     out = []
 
     def walk(rel):
         for name in sorted(os.listdir(os.path.join(root, rel) if rel else root)):
             path = "%s/%s" % (rel, name) if rel else name
-            if path in keep or (not rel and name in ("crew", NO_BUNDLED_SKILLS_MARKER)):
+            if path in keep or (not rel and name in ("crew", NO_BUNDLED_SKILLS_MARKER) + HERMES_KEPT_FILES):
                 continue
             if os.path.isdir(os.path.join(root, path)) and not os.path.islink(os.path.join(root, path)) \
                     and any(k.startswith(path + "/") for k in keep):
@@ -1032,7 +1041,8 @@ def _extras_missing(home, source_home, extras):
 def role_skills_todo(home, tpl, source_home):
     """(excess entries, missing extras, marker missing) for one role profile; all empty when slim."""
     extras = _conf_list(os.path.join(tpl, "settings.conf"), "skills_extra")
-    marker = not os.path.exists(os.path.join(home, "skills", NO_BUNDLED_SKILLS_MARKER))
+    # Hermes reads the opt-out at the profile root (tools/skills_sync.py: _hermes_home() / marker), not in skills/.
+    marker = not os.path.exists(os.path.join(home, NO_BUNDLED_SKILLS_MARKER))
     return _skills_excess(home, extras), _extras_missing(home, source_home, extras), marker
 
 
@@ -1071,7 +1081,7 @@ def step_role_skills(home, tpl, source_home, apply, owned=True):
         else:
             shutil.rmtree(path)
     if marker:
-        Path(os.path.join(root, NO_BUNDLED_SKILLS_MARKER)).write_text(NO_BUNDLED_SKILLS_TEXT)
+        Path(os.path.join(home, NO_BUNDLED_SKILLS_MARKER)).write_text(NO_BUNDLED_SKILLS_TEXT)
     return "CHANGED", "role skills slim: dropped %d entr%s%s" % (
         len(excess), "y" if len(excess) == 1 else "ies", (", added %s" % ", ".join(missing)) if missing else "")
 

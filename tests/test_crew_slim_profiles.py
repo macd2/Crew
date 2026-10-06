@@ -29,6 +29,11 @@ spec.loader.exec_module(CI)
 KERNEL_TOOLSETS = Path.home() / ".hermes" / "hermes-agent" / "toolsets.py"
 
 
+
+def slim_listing(path):
+    """A role skills dir as the slim check sees it: Hermes's own sync/curator records are kept, not counted."""
+    return sorted(n for n in os.listdir(path) if n not in CI.HERMES_KEPT_FILES)
+
 class Fake:
     """What CI.h returns: a finished process with no output."""
     returncode = 1
@@ -70,20 +75,21 @@ class SlimSkillsTests(unittest.TestCase):
         self.tpl = os.path.join(self.tmp, "tpl")
         put(os.path.join(self.tpl, "settings.conf"), "crew.role = worker\nskills_extra = [devops/foo]\n")
 
-    def test_the_kept_set_is_crew_the_extras_and_the_marker(self):
+    def test_the_kept_set_is_crew_the_extras_and_what_hermes_keeps(self):
         cloned_skills(self.home)
         self.assertEqual(
-            [".bundled_manifest", ".curator_ledger.jsonl", ".git", "README.md", "devops", "marketing"],
+            [".curator_ledger.jsonl", ".git", "README.md", "devops", "marketing"],
             CI._skills_excess(self.home, []))
         self.assertEqual(
-            [".bundled_manifest", ".curator_ledger.jsonl", ".git", "README.md", "devops/bar", "marketing"],
+            [".curator_ledger.jsonl", ".git", "README.md", "devops/bar", "marketing"],
             CI._skills_excess(self.home, ["devops/foo"]))
 
     def test_slimming_leaves_crew_and_the_extra_and_nothing_else(self):
         root = cloned_skills(self.home)
         status, detail = CI.step_role_skills(self.home, self.tpl, self.source, True)
         self.assertEqual("CHANGED", status, detail)
-        self.assertEqual([".no-bundled-skills", "crew", "devops"], sorted(os.listdir(root)))
+        self.assertEqual(["crew", "devops"], slim_listing(root))
+        self.assertTrue(os.path.isfile(os.path.join(self.home, ".no-bundled-skills")))  # where Hermes reads it
         self.assertEqual(["foo"], os.listdir(os.path.join(root, "devops")))
         self.assertTrue(os.path.isfile(os.path.join(root, "crew", "crew-role-worker", "SKILL.md")))
         self.assertLess(tree_bytes(root), 1024 * 1024)
@@ -126,12 +132,24 @@ class SlimSkillsTests(unittest.TestCase):
         self.assertEqual("FAILED", status)
         self.assertTrue(os.path.isfile(os.path.join(real, "devops", "foo", "SKILL.md")))
 
+    def test_what_hermes_reseeds_under_the_opt_out_is_not_excess(self):
+        # Hermes keeps seeding its essential skill and writes its own records even in an opted-out profile;
+        # trimming those would be undone by every `hermes update` and the check would never settle.
+        root = os.path.join(self.home, "skills")
+        put(os.path.join(root, "crew", "crew-role-worker", "SKILL.md"), "w")
+        put(os.path.join(root, "autonomous-ai-agents", "hermes-agent", "SKILL.md"), "h")
+        put(os.path.join(root, "autonomous-ai-agents", "DESCRIPTION.md"), "d")
+        put(os.path.join(root, ".bundled_manifest"), "hermes-agent:abc\n")
+        put(os.path.join(root, ".curator_state"), "{}")
+        put(os.path.join(root, "creative", "x", "SKILL.md"), "x")
+        self.assertEqual(["creative"], CI._skills_excess(self.home, []))
+
     def test_no_extras_means_crew_only(self):
         root = cloned_skills(self.home)
         bare = os.path.join(self.tmp, "bare")
         put(os.path.join(bare, "settings.conf"), "crew.role = worker\nskills_extra = []\n")
         CI.step_role_skills(self.home, bare, self.source, True)
-        self.assertEqual([".no-bundled-skills", "crew"], sorted(os.listdir(root)))
+        self.assertEqual(["crew"], slim_listing(root))
 
 
 class ShippedListsTests(unittest.TestCase):
@@ -290,7 +308,8 @@ class ProvisionFlowTests(unittest.TestCase):
             home = CI.resolve_profile_home("crew-" + role)
             skills = os.path.join(home, "skills")
             self.assertLess(tree_bytes(skills), 1024 * 1024, role)
-            self.assertEqual([".no-bundled-skills", "crew"], sorted(os.listdir(skills)), role)
+            self.assertEqual(["crew"], slim_listing(skills), role)
+            self.assertTrue(os.path.isfile(os.path.join(home, ".no-bundled-skills")), role)
             for name in CI.skill_names():
                 self.assertTrue(os.path.isfile(os.path.join(skills, "crew", name, "SKILL.md")), (role, name))
         worker = CI.resolve_profile_home("crew-worker")
@@ -309,7 +328,7 @@ class ProvisionFlowTests(unittest.TestCase):
         self.assertIn("update crew-verifier", detail)
         self.assertTrue(os.path.isdir(os.path.join(fat, ".git")), "--check must not delete")
         CI.step_profiles("chat", "crew-", True)
-        self.assertEqual([".no-bundled-skills", "crew"], sorted(os.listdir(fat)))
+        self.assertEqual(["crew"], slim_listing(fat))
 
     def test_parity_passes_on_the_provisioned_tree_and_sees_a_stale_role_skill(self):
         import subprocess
