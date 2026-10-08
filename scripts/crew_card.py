@@ -214,10 +214,41 @@ def default_budget(role):
     return val if isinstance(val, int) else DEFAULT_BUDGET
 
 
-def kanban_db():
-    for path in (os.environ.get("HERMES_KANBAN_DB") or "", os.environ.get("KANBAN_DB") or "",
-                 os.path.join(base_home(), "kanban.db")):
+def kanban_db(card_id=None):
+    for path in (os.environ.get("HERMES_KANBAN_DB") or "", os.environ.get("KANBAN_DB") or ""):
         if path and os.path.exists(path):
+            return path
+    if card_id:
+        import glob
+        for path in glob.glob(os.path.join(base_home(), "kanban", "boards", "*", "kanban.db")):
+            try:
+                conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+                if conn.execute("select 1 from tasks where id = ?", (card_id,)).fetchone():
+                    conn.close()
+                    return path
+                conn.close()
+            except Exception:
+                pass
+    k_home = os.path.join(base_home(), "kanban")
+    board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if board_env:
+        b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
+        if os.path.exists(b_path):
+            return b_path
+    cur_ptr = os.path.join(k_home, "current")
+    if os.path.exists(cur_ptr):
+        try:
+            with open(cur_ptr, "r", encoding="utf-8") as f:
+                slug = f.read().strip()
+            if slug:
+                b_path = os.path.join(k_home, "boards", slug, "kanban.db")
+                if os.path.exists(b_path):
+                    return b_path
+        except Exception:
+            pass
+    for path in (os.path.join(base_home(), "kanban", "boards", "default", "kanban.db"),
+                 os.path.join(base_home(), "kanban.db")):
+        if os.path.exists(path):
             return path
     return None
 

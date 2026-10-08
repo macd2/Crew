@@ -75,10 +75,32 @@ def base_home():
 
 
 def kanban_db_path():
-    env = os.environ.get("KANBAN_DB") or ""
-    if env and os.path.exists(env):
-        return env
-    p = os.path.join(base_home(), "kanban.db")
+    for env in ("HERMES_KANBAN_DB", "KANBAN_DB"):
+        v = (os.environ.get(env) or "").strip()
+        if v and os.path.exists(v):
+            return v
+    base = base_home()
+    k_home = os.path.join(base, "kanban")
+    board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if board_env:
+        b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
+        if os.path.exists(b_path):
+            return b_path
+    cur_ptr = os.path.join(k_home, "current")
+    if os.path.exists(cur_ptr):
+        try:
+            with open(cur_ptr, "r", encoding="utf-8") as f:
+                slug = f.read().strip()
+            if slug:
+                b_path = os.path.join(k_home, "boards", slug, "kanban.db")
+                if os.path.exists(b_path):
+                    return b_path
+        except Exception:
+            pass
+    def_path = os.path.join(k_home, "boards", "default", "kanban.db")
+    if os.path.exists(def_path):
+        return def_path
+    p = os.path.join(base, "kanban.db")
     return p if os.path.exists(p) else None
 
 
