@@ -89,6 +89,10 @@ def _tasks_db():
     k_home = os.path.join(HOME, "kanban")
     board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
     if board_env:
+        if board_env == "default":
+            p = os.path.join(HOME, "kanban.db")
+            if os.path.exists(p):
+                return p
         b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
         if os.path.exists(b_path):
             return b_path
@@ -97,15 +101,16 @@ def _tasks_db():
         try:
             with open(cur_ptr, "r", encoding="utf-8") as f:
                 slug = f.read().strip()
-            if slug:
+            if slug == "default":
+                p = os.path.join(HOME, "kanban.db")
+                if os.path.exists(p):
+                    return p
+            elif slug:
                 b_path = os.path.join(k_home, "boards", slug, "kanban.db")
                 if os.path.exists(b_path):
                     return b_path
         except Exception:
             pass
-    def_path = os.path.join(k_home, "boards", "default", "kanban.db")
-    if os.path.exists(def_path):
-        return def_path
     candidates = [
         os.path.join(HOME, "kanban.db"),
         os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db"),

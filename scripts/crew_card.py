@@ -232,6 +232,10 @@ def kanban_db(card_id=None):
     k_home = os.path.join(base_home(), "kanban")
     board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
     if board_env:
+        if board_env == "default":
+            p = os.path.join(base_home(), "kanban.db")
+            if os.path.exists(p):
+                return p
         b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
         if os.path.exists(b_path):
             return b_path
@@ -240,17 +244,18 @@ def kanban_db(card_id=None):
         try:
             with open(cur_ptr, "r", encoding="utf-8") as f:
                 slug = f.read().strip()
-            if slug:
+            if slug == "default":
+                p = os.path.join(base_home(), "kanban.db")
+                if os.path.exists(p):
+                    return p
+            elif slug:
                 b_path = os.path.join(k_home, "boards", slug, "kanban.db")
                 if os.path.exists(b_path):
                     return b_path
         except Exception:
             pass
-    for path in (os.path.join(base_home(), "kanban", "boards", "default", "kanban.db"),
-                 os.path.join(base_home(), "kanban.db")):
-        if os.path.exists(path):
-            return path
-    return None
+    p = os.path.join(base_home(), "kanban.db")
+    return p if os.path.exists(p) else None
 
 
 def card_row(card_id):

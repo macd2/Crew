@@ -47,6 +47,17 @@ class KanbanMultiBoardResolutionTests(unittest.TestCase):
         resolved = crew_graph.kanban_db_path()
         self.assertEqual(resolved, self.test_db)
 
+    def test_default_board_resolves_to_root_kanban_db(self):
+        root_db = os.path.join(self.home, "kanban.db")
+        Path(root_db).touch()
+        cur_file = os.path.join(self.k_home, "current")
+        with open(cur_file, "w", encoding="utf-8") as f:
+            f.write("default\n")
+
+        import crew_graph
+        resolved = crew_graph.kanban_db_path()
+        self.assertEqual(resolved, root_db)
+
     def test_hermes_kanban_db_direct_pin(self):
         pinned_db = os.path.join(self.home, "pinned.db")
         Path(pinned_db).touch()
