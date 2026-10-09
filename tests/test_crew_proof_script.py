@@ -48,7 +48,7 @@ class GuardCase(unittest.TestCase):
         if (installed / "config.yaml").exists():
             return load_plugin(installed), "installed crew-%s" % role
         home = Path(self.tmp) / role
-        home.mkdir()
+        home.mkdir(exist_ok=True)
         (home / "config.yaml").write_text("crew:\n  role: %s\n" % role)
         return load_plugin(home), "scratch %s" % role
 

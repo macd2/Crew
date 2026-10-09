@@ -1,5 +1,5 @@
 name: crew
-version: 0.8.0
+version: 0.8.1
 manifest_version: 2
 api_version: 1
 # Hermes refuses to load the plugin below this release (requires_hermes gate). 0.8.0 is the first crew that runs on

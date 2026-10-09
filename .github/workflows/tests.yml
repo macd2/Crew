@@ -1,0 +1,45 @@
+# This is how pull requests get tested: on GitHub's runners, never on a maintainer machine.
+# A first-time contributor's run waits until a maintainer approves it (Settings > Actions > General >
+# "Approval for running fork pull request workflows"). Read the diff before approving.
+name: tests
+
+on:
+  pull_request:
+    branches: [main, '*.x']
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Some tests build a real kanban board with Hermes's own code (tests/kernel_board.py), so the
+      # suite needs hermes_cli. Hermes is not on PyPI at the plugin's floor (0.21.5), and building a
+      # wheel is refused upstream, so: a pinned release tag, editable install, no account, no TTY.
+      - name: Install Hermes (release tag v2026.9.24 = 0.21.5) and pytest
+        run: |
+          git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes-agent"
+          # a tag can be moved; the commit cannot
+          test "$(git -C "$RUNNER_TEMP/hermes-agent" rev-parse HEAD)" = "f97608f178d1ffeca59860195ab7da295f7c8e5f"
+          python -m pip install --upgrade pip
+          python -m pip install -e "$RUNNER_TEMP/hermes-agent" pytest
+      - name: Run the suite
+        run: python -m pytest tests -q
