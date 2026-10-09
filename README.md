@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.7.9-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.8.0-3fb950?style=flat-square)](plugin.yaml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-crew.forgecoreai.com-0a0e14?style=flat-square)](https://crew.forgecoreai.com)
@@ -46,7 +46,10 @@ result back in the same chat, or one concrete question when it truly needs you.
 
 ## Install
 
-Requires Hermes Agent with the kanban board, and Python 3.11+.
+Requires Hermes Agent **0.21.5 or newer** with the kanban board, and Python 3.11+. The plugin declares
+`requires_hermes: ">=0.21.5"`, so an older Hermes refuses to load it instead of failing half-way. From 0.8.0 crew
+runs on Hermes's package-manager dependency layout (the gateway's bare interpreter plus a committed venv) as well
+as the older in-tree venv; 0.7.x only knew the latter, and a `hermes update` onto the new layout broke its proofs.
 
 ```sh
 # 1. get the plugin
@@ -93,7 +96,7 @@ Only when you ask for it:
 
 | Flag | What it adds |
 |---|---|
-| `--nightly-proofs` | A Hermes cron job at 03:00 that runs the proof suite and speaks only on a failure, plus the shim `<profile>/scripts/crew_proofs.sh` (Hermes cron runs scripts from there only). Output stays local unless `--proofs-deliver TARGET`. |
+| `--nightly-proofs` | A Hermes cron job at 03:00 that runs the proof suite and speaks only on a failure, plus the shim `<profile>/scripts/crew_proofs_nightly.py` (Hermes cron runs scripts from there only, and runs a `.py` one with Hermes's own interpreter, which the proofs need; an older `crew_proofs.sh` shim is migrated and removed). Output stays local unless `--proofs-deliver TARGET`. |
 | `--chat-kanban` | Enables the kanban toolset on the zulip and telegram platforms of your profile. |
 | `--telegram-menu` | Puts the crew commands first in your Telegram command menu. |
 | `--spill-cap` | Sets `hooks.output_spill.max_chars` on your profile, so the `/crew` intake reads its brief in one tool call. |
@@ -205,7 +208,7 @@ systemctl --user disable --now crew-graph-http.service
 
 The role profiles stay until you remove them (`hermes profile delete crew-worker`, ...). With
 `--nightly-proofs`, also remove the cron job (`hermes cron list`, `hermes cron remove <id>`) and
-`<profile>/scripts/crew_proofs.sh`.
+`<profile>/scripts/crew_proofs_nightly.py`.
 
 ## License
 

@@ -23,6 +23,7 @@ script on a card records its sha256 on the card, and a later run of a changed sc
 refusal (`SCRIPT_CHANGED`) and the coordinator decides (crew_coordinator `revise_script`: it may accept the script or
 have the verifier rewrite it, with a reason on record); the writer never writes or changes a proof script.
 """
+import glob
 import hashlib
 import os
 import re
@@ -50,7 +51,27 @@ def _hermes():
     for src in HERMES_SRC:
         if src and os.path.isdir(src) and src not in sys.path:
             sys.path.append(src)
+    _venv_deps()
     import tools.approval_detection  # noqa: F401
+
+
+def _venv_deps():
+    """Put Hermes's dependency venv on the path when this interpreter cannot import them itself: under the
+    package-manager layout a bare interpreter (cron, the gateway) runs the crew scripts while ruamel and the rest
+    live in the venv Hermes commits. Appended last, so anything the bare interpreter has wins."""
+    try:
+        import ruamel.yaml  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import crew_card
+    py = crew_card.hermes_python()
+    if not py:
+        return
+    pattern = os.path.join(os.path.dirname(os.path.dirname(py)), "lib", "python*", "site-packages")
+    for site in sorted(glob.glob(pattern)):
+        if site not in sys.path:
+            sys.path.append(site)
 
 
 def proof_env(extra=None):
@@ -78,13 +99,19 @@ def _permanently_approved(key, cmd):
 
 
 def _tirith_block(cmd):
-    """Why tirith stops this command, '' when it does not. An unusable scanner follows security.tirith_fail_open
-    exactly as tools/approval.py does: open (default) lets it through, closed blocks."""
-    from tools.approval_context import _tirith_fail_open
+    """Why tirith stops this command, '' when it does not. A Hermes without the scanner (it was removed from core)
+    has nothing to stop it. An unusable scanner follows security.tirith_fail_open exactly as tools/approval.py
+    did: open (default) lets it through, closed blocks."""
     try:
         from tools.tirith_security import check_command_security
+    except ModuleNotFoundError:
+        return ""
+    except Exception:  # noqa: BLE001
+        check_command_security = None
+    try:
         verdict = check_command_security(cmd)
     except Exception:  # noqa: BLE001
+        from tools.approval_context import _tirith_fail_open
         return "" if _tirith_fail_open() else "the tirith scanner is unavailable and security.tirith_fail_open is false"
     if verdict.get("action") in ("block", "warn"):
         return "tirith: %s" % (verdict.get("summary") or verdict.get("action"))

@@ -24,7 +24,17 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROOFS_BOARD = "crew-proofs"
 AGENT = os.environ.get("HERMES_SRC") or os.path.expanduser("~/.hermes/hermes-agent")
-VENV_PY = os.environ.get("HERMES_PY", os.path.join(AGENT, ".venv", "bin", "python"))
+
+
+def _hermes_python(root):
+    """The python that imports hermes_cli (crew_card.hermes_python), or this one when none is found."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import crew_card
+    return crew_card.hermes_python(root) or sys.executable
+
+
+VENV_PY = os.environ.get("HERMES_PY") or _hermes_python(AGENT)
 
 
 def init_board(db_path, real_home=None):

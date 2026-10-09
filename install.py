@@ -43,14 +43,23 @@ OLD_CRON_NAMES = ("crew self-heal", "Crew observer (weekly)")
 CRON_PROOFS_NAME = "Crew proofs (nightly)"
 CRON_PROOFS_SCHEDULE = "0 3 * * *"
 CRON_PROOFS_DELIVER = "local"
-# Hermes cron only runs a script that sits inside HERMES_HOME/scripts, so the one file crew keeps there is this
-# shim; the proofs themselves run from the plugin's own copy.
-PROOFS_SHIM = "crew_proofs.sh"
+# Hermes cron only runs a script that sits inside HERMES_HOME/scripts, and runs a .py one with its own interpreter
+# (the one the proofs need; a .sh one runs under bash and a bare python3 lacks Hermes's dependencies). So the one
+# file crew keeps there is this Python shim; the proofs themselves run from the plugin's own copy. The name must
+# differ from crew_proofs.py, which is in SCRIPT_FILES and which step_scripts removes from <profile>/scripts.
+PROOFS_SHIM = "crew_proofs_nightly.py"
+OLD_PROOFS_SHIM = "crew_proofs.sh"      # the earlier shim; step_proofs_cron migrates a job off it, then deletes it
 PROOFS_SHIM_TEXT = (
-    "#!/bin/sh\n"
-    "# Written by the crew installer (--nightly-proofs). Hermes cron runs scripts from HERMES_HOME/scripts only,\n"
-    "# so this hands over to the plugin's own copy of the proof runner.\n"
-    "exec python3 \"$(dirname \"$0\")/../plugins/crew/scripts/crew_proofs.py\" --quiet \"$@\"\n")
+    "# Written by the crew installer (--nightly-proofs). Hermes cron runs scripts from HERMES_HOME/scripts only\n"
+    "# and runs a .py one with whatever interpreter Hermes itself runs under (on the package-manager layout a bare\n"
+    "# one that cannot import Hermes), so this hands over to the plugin's own copy of the proof runner, which\n"
+    "# switches to the Hermes python itself.\n"
+    "import os\n"
+    "import sys\n"
+    "\n"
+    "runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"..\", \"plugins\", \"crew\", \"scripts\",\n"
+    "                      \"crew_proofs.py\")\n"
+    "os.execv(sys.executable, [sys.executable, runner, \"--quiet\"] + sys.argv[1:])\n")
 
 # Everything in the package's scripts/ ships: one list derived from the tree, so a new script can never be left
 # out of the installed copy (crew_safety.py once was, and every importer crashed). Bytecode never ships.
@@ -71,6 +80,8 @@ PLUGIN_FILES = (["plugin.yaml", "__init__.py", "skills/crew-verifier/SKILL.md",
                  "skills/crew-role-worker/SKILL.md", "skills/crew-role-content/SKILL.md",
                  "skills/crew/SKILL.md", "skills/crew-diagnose/SKILL.md"]
                 + ["scripts/" + rel for rel in SCRIPT_FILES])
+# Files the plugin copy once held and the package has since deleted: their presence makes the copy stale.
+PLUGIN_RETIRED_FILES = ["scripts/crew_proofs.sh"]
 ROLE_FILES = ["roles.json", "briefs/coordinator.md", "briefs/worker.md", "briefs/content.md",
               "briefs/verifier.md"]
 
@@ -133,12 +144,17 @@ print(json.dumps(out))
 
 
 def _hermes_python():
+    """(python, root) of the Hermes install that can import hermes_cli: the package manager's committed venv,
+    else a legacy in-tree venv (crew_card.hermes_python decides); (None, None) when neither exists."""
+    scripts = os.path.join(SRC_DIR, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import crew_card
     root = os.path.dirname(os.path.dirname(os.path.realpath(hermes_bin())))
     for cand in (os.path.join(Path.home(), ".hermes", "hermes-agent"), root):
-        for d in ("venv", ".venv"):
-            py = os.path.join(cand, d, "bin", "python")
-            if os.path.exists(py):
-                return py, cand
+        py = crew_card.hermes_python(cand)
+        if py:
+            return py, cand
     return None, None
 
 
@@ -195,7 +211,8 @@ def step_plugin(profile_home, apply):
     dst = os.path.join(profile_home, "plugins", "crew")
     if os.path.realpath(dst) == os.path.realpath(SRC_DIR):
         return "OK", "plugin crew (this checkout is the plugin dir: `hermes plugins install` mode)"
-    if os.path.isdir(dst) and _tree_ok(SRC_DIR, dst, PLUGIN_FILES):
+    if (os.path.isdir(dst) and _tree_ok(SRC_DIR, dst, PLUGIN_FILES)
+            and not any(os.path.lexists(os.path.join(dst, r)) for r in PLUGIN_RETIRED_FILES)):
         return "OK", "plugin crew (up to date)"
     if not apply:
         return "CHANGED", "plugin crew -> copy into %s" % dst
@@ -217,38 +234,42 @@ def step_plugin(profile_home, apply):
 # nothing else in that directory (the owner's own scripts live there too).
 
 def _stale_scripts(dst):
-    """Relative names under <profile>/scripts/ that a crew install put there. crew_proofs.sh is not one of them:
-    it is the cron shim (see step_proofs_shim)."""
-    names = [r for r in SCRIPT_FILES + RETIRED_SCRIPT_FILES if r != PROOFS_SHIM]
-    return [r for r in names if os.path.isfile(os.path.join(dst, r))]
-
-
-def _shim_stale(dst):
-    """True when HERMES_HOME/scripts/crew_proofs.sh exists and is not the shim (an old full copy)."""
-    path = os.path.join(dst, PROOFS_SHIM)
-    return os.path.isfile(path) and _read(path) != PROOFS_SHIM_TEXT.encode()
+    """Relative names under <profile>/scripts/ that a crew install put there. The nightly shim is not one of them
+    (it is not in either list; step_proofs_cron owns it and the old crew_proofs.sh)."""
+    return [r for r in SCRIPT_FILES + RETIRED_SCRIPT_FILES if os.path.isfile(os.path.join(dst, r))]
 
 
 def _write_shim(dst):
     os.makedirs(dst, exist_ok=True)
     path = os.path.join(dst, PROOFS_SHIM)
+    if os.path.islink(path):
+        os.unlink(path)      # write_text follows a symlink and would overwrite its target
     Path(path).write_text(PROOFS_SHIM_TEXT)
     os.chmod(path, 0o755)
 
 
+def step_old_shim(profile_home, apply):
+    """Remove the old crew_proofs.sh from a profile no proofs job runs in: a role profile, which only ever got a
+    copy, or a profile whose job was never registered. A symlink is unlinked, its target never touched."""
+    old = os.path.join(profile_home, "scripts", OLD_PROOFS_SHIM)
+    if not os.path.lexists(old):
+        return "OK", "no old %s" % OLD_PROOFS_SHIM
+    if not apply:
+        return "CHANGED", "remove " + old
+    os.remove(old)
+    print("  removed %s" % old)
+    return "CHANGED", "removed " + old
+
+
 def step_scripts(profile_home, apply):
-    """Remove the crew script copies an earlier install left in <profile>/scripts/, listing each one. An existing
-    crew_proofs.sh is rewritten as the shim so a registered nightly job keeps working."""
+    """Remove the crew script copies an earlier install left in <profile>/scripts/, listing each one."""
     dst = os.path.join(profile_home, "scripts")
     stale = _stale_scripts(dst)
-    shim = _shim_stale(dst)
-    if not stale and not shim:
+    if not stale:
         return "OK", "no crew script copies in %s (crew runs from plugins/crew/scripts)" % dst
-    what = ["remove " + ", ".join(stale)] if stale else []
-    if shim:
-        what.append("replace the old %s copy with the shim" % PROOFS_SHIM)
+    what = "remove " + ", ".join(stale)
     if not apply:
-        return "CHANGED", "scripts in %s: %s" % (dst, "; ".join(what))
+        return "CHANGED", "scripts in %s: %s" % (dst, what)
     for rel in stale:
         path = os.path.join(dst, rel)
         os.remove(path)
@@ -259,10 +280,7 @@ def step_scripts(profile_home, apply):
             print("  removed empty dir %s" % os.path.join(dst, rel))
         except OSError:
             pass
-    if shim:
-        _write_shim(dst)
-        print("  rewrote %s as the shim" % os.path.join(dst, PROOFS_SHIM))
-    return "CHANGED", "scripts in %s: %s" % (dst, "; ".join(what))
+    return "CHANGED", "scripts in %s: %s" % (dst, what)
 
 
 def step_roles(profile_home, apply):
@@ -618,7 +636,9 @@ def permission_problems(home):
     One owner for the rule, so the step, install.py --check and the proof suite cannot disagree.
     A declared hook with no approval is the silent-skip case: the runtime skips it and the gate
     (facts-gate, no-agent-attribution-gate, model-gate, the Windows-path guard) never runs, while
-    the home still looks installed.
+    the home still looks installed. Approval drift (the script changed after it was approved) does not stop the
+    hook - Hermes matches the allowlist on event and command only - but the owner approved a different script, so
+    it is reported for review, with Hermes's own remedy (revoke, then approve again).
     """
     pairs = _declared_hooks(home)
     if not pairs:
@@ -710,8 +730,10 @@ def consent_hint(name):
     flag = " ".join(profile_flag(name))
     cli = "hermes %s" % flag if flag else "hermes"
     return ("approve with Hermes, not the installer: review `%s hooks list`, then run `%s chat` in a terminal and "
-            "confirm each hook at its prompt (or `%s chat --accept-hooks` once, yourself); check with `%s hooks doctor`"
-            % (cli, cli, cli, cli))
+            "confirm each hook at its prompt (or `%s chat --accept-hooks` once, yourself); an approval-drift hook keeps "
+            "its old entry, which --accept-hooks never refreshes: `%s hooks revoke <command>` it first, then approve "
+            "again; check with `%s hooks doctor`"
+            % (cli, cli, cli, cli, cli))
 
 
 def step_permissions(profile_home, profile, prefix, apply):
@@ -733,7 +755,7 @@ def step_permissions(profile_home, profile, prefix, apply):
         pairs = sum(len(_declared_hooks(home)) for _name, home in homes)
         return "OK", "%d home(s), %d declared hook(s), every one approved in Hermes's allowlist" % (len(homes), pairs)
     summary = "; ".join(findings[:3]) + ("" if len(findings) <= 3 else " (+%d more)" % (len(findings) - 3))
-    return "FAILED", "hook consent missing - %s | %s" % (summary, " | ".join(hints))
+    return "FAILED", "hook consent missing or stale - %s | %s" % (summary, " | ".join(hints))
 
 
 def plugin_script(profile_home, name):
@@ -933,29 +955,40 @@ def step_proofs_cron(profile, profile_home, apply, no_cron, nightly=False, deliv
     """--nightly-proofs: run every crew proof on the crew-proofs board each night; the job stays silent unless one of
     them fails, and its output goes to `deliver` (local unless --proofs-deliver names a target). crew_proofs.py pins
     the board for every proof, so the cron needs no board setting of its own. Hermes cron only runs scripts from
-    HERMES_HOME/scripts, so the one file crew keeps there is the shim that hands over to the plugin's copy. A job an
-    earlier install registered stays registered (its script is migrated to the shim by the scripts step)."""
+    HERMES_HOME/scripts, so the one file crew keeps there is the Python shim that hands over to the plugin's copy.
+    A job an earlier install registered stays registered, and is migrated here: pointed at the Python shim, and
+    only then is the old crew_proofs.sh deleted (a symlink is unlinked, its target never touched). This step runs
+    after step_scripts, which does not touch either file."""
     if no_cron:
         return "SKIP", "proofs cron (--no-cron)"
     cid = _cron_id(profile, CRON_PROOFS_NAME)
-    shim = os.path.join(profile_home, "scripts", PROOFS_SHIM)
-    shim_ok = _read(shim) == PROOFS_SHIM_TEXT.encode()
-    if not nightly:
-        if cid:
-            return "OK", "proofs cron %s (registered earlier; kept)" % cid
+    scripts = os.path.join(profile_home, "scripts")
+    shim = os.path.join(scripts, PROOFS_SHIM)
+    old = os.path.join(scripts, OLD_PROOFS_SHIM)
+    shim_ok = _read(shim) == PROOFS_SHIM_TEXT.encode() and not os.path.islink(shim)
+    old_there = os.path.lexists(old)
+    if not nightly and not cid:
+        if old_there:
+            return step_old_shim(profile_home, apply)
         return "SKIP", "proofs cron (--nightly-proofs registers it; delivery %s unless --proofs-deliver)" % deliver
-    if cid and shim_ok:
-        return "OK", "proofs cron %s" % cid
+    if cid and shim_ok and not old_there:
+        return "OK", "proofs cron %s%s" % (cid, "" if nightly else " (registered earlier; kept)")
     if not apply:
-        return "CHANGED", "proofs cron (nightly, deliver %s)%s" % (deliver, "" if shim_ok else ", write " + shim)
+        todo = ([] if shim_ok else ["write " + shim]) + (["point the job at it"] if cid else ["register the job"]) \
+            + (["remove " + old] if old_there else [])
+        return "CHANGED", "proofs cron%s: %s" % ("" if nightly else " " + cid, ", ".join(todo))
     if not shim_ok:
-        _write_shim(os.path.join(profile_home, "scripts"))
+        _write_shim(scripts)
         print("  wrote %s" % shim)
     if cid:
-        return "CHANGED", "proofs cron %s: shim written" % cid
-    h(profile, "cron", "create", CRON_PROOFS_SCHEDULE, "--name", CRON_PROOFS_NAME,
-      "--script", PROOFS_SHIM, "--no-agent", "--deliver", deliver)
-    cid = _cron_id(profile, CRON_PROOFS_NAME)
+        h(profile, "cron", "edit", cid, "--script", PROOFS_SHIM)
+    else:
+        h(profile, "cron", "create", CRON_PROOFS_SCHEDULE, "--name", CRON_PROOFS_NAME,
+          "--script", PROOFS_SHIM, "--no-agent", "--deliver", deliver)
+        cid = _cron_id(profile, CRON_PROOFS_NAME)
+    if old_there:
+        os.remove(old)       # on a symlink this removes the link only
+        print("  removed %s" % old)
     return "CHANGED", "proofs cron %s (deliver %s)" % (cid or "(not found after create)", deliver)
 
 
@@ -1249,7 +1282,7 @@ def _provision_role_profile(name, home, tpl, source_home, owned):
     it the role guards (budget hard stop, verifier read-only) and the card tool do not exist.
     Then cut its skills dir down to what the role uses (step_role_skills, crew-created profiles only)."""
     done = []
-    for step in (step_plugin, step_skills, step_scripts, step_roles, step_crew_dirs,
+    for step in (step_plugin, step_skills, step_scripts, step_old_shim, step_roles, step_crew_dirs,
                  lambda h_, a_: step_role_skills(h_, tpl, source_home, a_, owned)):
         try:
             status, detail = step(home, True)
@@ -1290,7 +1323,7 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             # package root, so its files are compared against plugins/crew/ in the profile.
             _tree_ok(str(SRC_DIR), os.path.join(home, "plugins", "crew"), PLUGIN_FILES)
             and not _stale_scripts(os.path.join(home, "scripts"))
-            and not _shim_stale(os.path.join(home, "scripts"))
+            and not os.path.lexists(os.path.join(home, "scripts", OLD_PROOFS_SHIM))
             and _tree_ok(str(SRC_DIR / "roles"), os.path.join(home, "roles", "crew"), ROLE_FILES)
             and (not crew_owned(home)
                  or not any(role_skills_todo(home, tpl, resolve_profile_home(source_profile)))))

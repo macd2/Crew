@@ -38,9 +38,12 @@ class SafetyCase(unittest.TestCase):
         # tirith resolves its binary under HERMES_HOME/bin and tries to install it into this scratch home
         # (11 s a call); the pattern detectors under test are Hermes's real ones, tirith is not what these test
         crew_safety._hermes()
-        patch = mock.patch("tools.tirith_security.check_command_security", return_value={"action": "allow"})
-        patch.start()
-        self.addCleanup(patch.stop)
+        try:
+            patch = mock.patch("tools.tirith_security.check_command_security", return_value={"action": "allow"})
+            patch.start()
+            self.addCleanup(patch.stop)
+        except (ImportError, AttributeError):     # a Hermes that no longer bundles tirith has nothing to patch
+            pass
         conn = sqlite3.connect(self.db)
         conn.executescript(
             "create table tasks (id text primary key, title text, status text, assignee text, body text);"

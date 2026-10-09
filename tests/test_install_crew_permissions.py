@@ -445,11 +445,13 @@ class OptInStepsTests(unittest.TestCase):
         self.assertEqual("CHANGED", status, detail)
         create = [c for c in self.cfg.calls if c[1:3] == ("cron", "create")][0]
         self.assertEqual("local", create[create.index("--deliver") + 1])
-        self.assertEqual("crew_proofs.sh", create[create.index("--script") + 1])
-        shim = Path(self.home, "scripts", "crew_proofs.sh")
+        self.assertEqual("crew_proofs_nightly.py", create[create.index("--script") + 1])
+        shim = Path(self.home, "scripts", "crew_proofs_nightly.py")
         self.assertEqual(CI.PROOFS_SHIM_TEXT, shim.read_text())
         self.assertTrue(os.access(shim, os.X_OK))
-        self.assertIn("plugins/crew/scripts/crew_proofs.py", shim.read_text())
+        self.assertIn("sys.executable", shim.read_text())
+        self.assertIn("plugins", shim.read_text())
+        self.assertIn("crew_proofs.py", shim.read_text())
 
     def test_proofs_deliver_overrides_the_target_and_no_cron_wins(self):
         CI.step_proofs_cron("p", self.home, True, False, nightly=True, deliver="telegram")
@@ -459,15 +461,52 @@ class OptInStepsTests(unittest.TestCase):
         self.assertEqual("SKIP", CI.step_proofs_cron("p", self.home, True, True, nightly=True)[0])
         self.assertEqual([], self.cfg.calls)
 
-    def test_a_cron_registered_earlier_stays_and_its_old_script_becomes_the_shim(self):
+    def test_a_cron_registered_earlier_is_migrated_to_the_python_shim_and_the_old_sh_goes(self):
         self.registered["Crew proofs (nightly)"] = "abc12345"
         old = Path(self.home, "scripts", "crew_proofs.sh")
-        old.write_text("#!/bin/sh\nexec python3 \"$(dirname \"$0\")/crew_proofs.py\" --quiet \"$@\"\n")
+        old.write_text("#!/bin/sh\nexec python3 x\n")
+        status, _detail = CI.step_proofs_cron("p", self.home, False, False)
+        self.assertEqual("CHANGED", status)
+        self.assertTrue(old.exists(), "--check removes nothing")
+        self.assertEqual("OK", CI.step_scripts(self.home, True)[0])
+        self.assertTrue(old.exists(), "step_scripts leaves crew_proofs.sh alone")
         status, _detail = CI.step_proofs_cron("p", self.home, True, False)
-        self.assertEqual("OK", status)
-        status, detail = CI.step_scripts(self.home, True)
-        self.assertEqual("CHANGED", status, detail)
-        self.assertEqual(CI.PROOFS_SHIM_TEXT, old.read_text())
+        self.assertEqual("CHANGED", status)
+        self.assertIn(("p", "cron", "edit", "abc12345", "--script", CI.PROOFS_SHIM), self.cfg.calls)
+        self.assertEqual(CI.PROOFS_SHIM_TEXT, Path(self.home, "scripts", CI.PROOFS_SHIM).read_text())
+        self.assertFalse(old.exists())
+        self.assertEqual("OK", CI.step_proofs_cron("p", self.home, True, False)[0])
+        self.assertEqual("OK", CI.step_scripts(self.home, True)[0])
+        self.assertTrue(Path(self.home, "scripts", CI.PROOFS_SHIM).exists(), "step_scripts keeps the shim")
+
+    def test_a_symlinked_old_sh_is_unlinked_and_its_target_untouched(self):
+        self.registered["Crew proofs (nightly)"] = "abc12345"
+        target = Path(self.tmp, "elsewhere.sh")
+        target.write_text("keep me")
+        old = Path(self.home, "scripts", "crew_proofs.sh")
+        old.symlink_to(target)
+        CI.step_proofs_cron("p", self.home, True, False)
+        self.assertFalse(os.path.lexists(old))
+        self.assertEqual("keep me", target.read_text())
+
+    def test_a_symlinked_shim_is_replaced_not_written_through(self):
+        target = Path(self.tmp, "shared_shim.py")
+        target.write_text("keep me")
+        Path(self.home, "scripts", CI.PROOFS_SHIM).symlink_to(target)
+        CI._write_shim(os.path.join(self.home, "scripts"))
+        self.assertEqual("keep me", target.read_text())
+        self.assertFalse(os.path.islink(os.path.join(self.home, "scripts", CI.PROOFS_SHIM)))
+
+    def test_without_a_job_the_old_sh_is_removed_and_nothing_is_registered(self):
+        # a role profile or a profile that never ran --nightly-proofs: the old copy is dead weight
+        old = Path(self.home, "scripts", "crew_proofs.sh")
+        old.write_text("#!/bin/sh\nexec python3 x\n")
+        self.assertEqual("CHANGED", CI.step_proofs_cron("p", self.home, False, False)[0])
+        self.assertTrue(old.exists(), "check mode removes nothing")
+        self.assertEqual("CHANGED", CI.step_old_shim(self.home, True)[0])
+        self.assertFalse(os.path.lexists(old))
+        self.assertEqual("SKIP", CI.step_proofs_cron("p", self.home, True, False)[0])
+        self.assertEqual([], [c for c in self.cfg.calls if c[1] == "cron" and c[2] != "list"])
 
 
 class StaleScriptsTests(unittest.TestCase):

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 HERE_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 if HERE_SCRIPTS not in sys.path:
@@ -925,6 +926,33 @@ def hermes_root():
         if path and os.path.isdir(path):
             return path
     return os.path.expanduser("~/.hermes/hermes-agent")
+
+
+def hermes_python(root=None):
+    """Path of a python that can import hermes_cli, or "". Order: the package manager's committed venv (the
+    layout where the gateway runs under a bare interpreter and Hermes's dependencies live in a venv it
+    commits), then the legacy in-tree venv/ or .venv/, then nothing."""
+    root = root or hermes_root()
+    added = root not in sys.path
+    if added:
+        sys.path.insert(0, root)
+    try:
+        from pm.environments import committed_venv
+        venv = committed_venv(Path(root))
+        if venv:
+            py = os.path.join(str(venv), "bin", "python")
+            if os.path.exists(py):
+                return py
+    except Exception:       # an older Hermes has no pm module; fall through to the legacy venvs
+        pass
+    finally:
+        if added and root in sys.path:
+            sys.path.remove(root)
+    for d in ("venv", ".venv"):
+        py = os.path.join(root, d, "bin", "python")
+        if os.path.exists(py):
+            return py
+    return ""
 
 
 def hermes_kb():
@@ -2372,9 +2400,10 @@ def reexec_under_hermes_python(script):
         return
     except ImportError:
         pass
-    py = next((p for p in (os.path.join(hermes_root(), d, "bin", "python") for d in ("venv", ".venv"))
-               if os.path.exists(p)), "")
-    if py and os.path.realpath(py) != os.path.realpath(sys.executable):
+    py = hermes_python()
+    # abspath, not realpath: a venv's python is a symlink to the very binary a bare run uses, and is the one
+    # whose site-packages count, so the two must not compare equal.
+    if py and os.path.abspath(py) != os.path.abspath(sys.executable):
         os.environ["CREW_REEXEC"] = "1"
         os.execv(py, [py, script] + sys.argv[1:])
 

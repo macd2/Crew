@@ -1,7 +1,10 @@
 name: crew
-version: 0.7.9
+version: 0.8.0
 manifest_version: 2
 api_version: 1
+# Hermes refuses to load the plugin below this release (requires_hermes gate). 0.8.0 is the first crew that runs on
+# Hermes's package-manager dependency layout; it still runs on the in-tree venv layout of 0.21.5.
+requires_hermes: ">=0.21.5"
 author: macd2
 license: Apache-2.0
 homepage: https://crew.forgecoreai.com

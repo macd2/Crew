@@ -563,9 +563,10 @@ def dashboard_asset(*names):
 
 
 def favicon_link():
-    """The tab icon as an inline <link>: the logo mark with no background, shipped beside the CSS and
-    embedded like it, so the page stays one self-contained document. The SVG carries the mark for a
-    dark and for a light tab (dev/make_favicon.py). A missing file costs the icon, never the page."""
+    """The tab icon as an inline <link>: the logo mark on a dark tile, shipped beside the CSS and embedded
+    like it, so the page stays one self-contained document. The tile keeps the dashboard's tab apart from
+    the landing page's, which shows the bare mark (dev/make_favicon.py). A missing file costs the icon,
+    never the page."""
     try:
         with open(os.path.join(DASH_DIR, "favicon.svg"), "rb") as fh:
             data = base64.b64encode(fh.read()).decode("ascii")
@@ -575,13 +576,13 @@ def favicon_link():
 
 
 def logo_link():
-    """The header mark as a link home: the same logo mark with no background as the tab icon, embedded
+    """The header mark as a link home: the logo mark with no background (mark.svg), embedded
     like the CSS so the page stays one self-contained document, pointing at the overview (/). The SVG
     carries the mark for a dark and a light page (dev/make_favicon.py), so the black ring of the
     on-light variant never disappears into a dark host background. A missing file costs the mark,
     never the page."""
     try:
-        with open(os.path.join(DASH_DIR, "favicon.svg"), "rb") as fh:
+        with open(os.path.join(DASH_DIR, "mark.svg"), "rb") as fh:
             data = base64.b64encode(fh.read()).decode("ascii")
     except OSError:
         return ""

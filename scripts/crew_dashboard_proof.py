@@ -282,6 +282,12 @@ def main():
         return fail("the header has no brand mark as its first element (the very top left)")
     if not re.search(r'<a class="brand" href="/"[^>]*><img src="data:image/svg\+xml;base64,[A-Za-z0-9+/=]+"', page):
         return fail("the brand mark is not the embedded logo mark with no background")
+    # The tab icon is the mark on a tile, never the bare mark: the landing page's tab shows the bare mark,
+    # and two identical tabs could not be told apart (owner, 2026-10-06).
+    tab = re.search(r'<link rel="icon" type="image/svg\+xml" href="data:image/svg\+xml;base64,([A-Za-z0-9+/=]+)"', page)
+    brand = re.search(r'<a class="brand" href="/"[^>]*><img src="data:image/svg\+xml;base64,([A-Za-z0-9+/=]+)"', page)
+    if not tab or tab.group(1) == brand.group(1):
+        return fail("the tab icon is missing or is the bare header mark, the landing page's icon")
     if not re.search(r"\d+ cards?<", page) or not re.search(r"(\d+ working now|nothing running)<", page):
         return fail("the header does not state the card count and what is working now")
     why = board_contract(board_data(), "proofs board")

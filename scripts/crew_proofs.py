@@ -150,6 +150,10 @@ def changed_since(rev):
 
 
 def main():
+    # Started by a bare interpreter (cron on the package-manager layout), switch to the Hermes python before any
+    # proof is spawned: each child is [sys.executable, proof], so it inherits the right one.
+    import crew_card
+    crew_card.reexec_under_hermes_python(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="include the proofs that need live services")
     ap.add_argument("--only", default="", help="comma-separated words matched against proof names")

@@ -20,6 +20,7 @@ Exit: 0 when every check passes, 1 otherwise.
 """
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +31,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import crew_proof_board  # noqa: E402
 KANBAN_DB = crew_proof_board.proof_db()
-VENV_PY = os.environ.get("CREW_PY") or os.path.expanduser("~/.hermes/hermes-agent/.venv/bin/python")
+VENV_PY = os.environ.get("CREW_PY") or crew_proof_board._hermes_python(crew_proof_board.AGENT)
 HERMES = os.environ.get("HERMES_BIN", "hermes")
 PROBE = "t" + "9ro" + "ute_pin"
 FAILS = []
@@ -44,6 +45,14 @@ def check(name, ok, detail=""):
 
 def run(cmd, timeout=180):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def worker_providers():
+    """The providers the worker role profile holds a credential for, from `hermes auth list`: the box's own
+    setting, never a list baked into the proof."""
+    import crew_card
+    r = run([HERMES, "-p", crew_card.role_profile("worker"), "auth", "list"], timeout=60)
+    return {m.group(1) for m in re.finditer(r"^(\S+) \(\d+ credentials?\):", r.stdout or "", re.M)}
 
 
 def dispatcher_argv(model=None, provider=None, route=None):
@@ -185,7 +194,7 @@ def main():
               bool(pick.get("provider")) and bool(pick.get("model")) and bool((pick.get("floor") or {}).get("min_context")),
               "%s / %s floor=%s" % (pick.get("provider"), pick.get("model"), pick.get("floor")))
     check("the pick names a Hermes provider the worker profile resolves",
-          pick.get("provider") in ("ai-gateway", "gemini", "openrouter"),
+          pick.get("provider") in worker_providers(),
           "provider=%s (router host=%s)" % (pick.get("provider"), pick.get("router_provider")))
 
     # 6. the pick lands on the card
