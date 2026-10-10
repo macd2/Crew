@@ -84,8 +84,10 @@ body.page-board{margin:0;background:var(--crew-bg);color:var(--crew-text-1);
 .page-board .card.live::after,.page-board .card.quiet::after{content:"";position:absolute;inset:-1px;border-radius:7px;
   padding:1px;pointer-events:none;
   background:conic-gradient(from var(--crew-arc), transparent 0 70%, var(--arc) 88%, transparent 100%);
-  -webkit-mask:linear-gradient(currentColor 0 0) content-box,linear-gradient(currentColor 0 0);-webkit-mask-composite:xor;
+  -webkit-mask:linear-gradient(currentColor 0 0) content-box,linear-gradient(currentColor 0 0);
+  -webkit-mask-composite:xor;
   mask:linear-gradient(currentColor 0 0) content-box exclude,linear-gradient(currentColor 0 0);
+  mask-composite:exclude;
   animation:crewarc var(--arc-s) linear infinite}
 .page-board .card.live{--arc:var(--crew-tone-running);--arc-s:2.2s}
 .page-board .card.quiet{--arc:var(--crew-tone-review);--arc-s:6s}

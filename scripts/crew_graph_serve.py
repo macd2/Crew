@@ -161,9 +161,12 @@ def board_data(include_all=False, older=False):
     counts or the live lanes: they fill the last, owner-collapsed 'archived' lane - the newest ARCHIVED_SHOWN,
     with `hidden` the rest, so lane tiles + hidden is the total. older (the Done lane's "Show N older")
     lists every done card instead of the newest DONE_SHOWN."""
+    board_slug = CG.active_board_slug()
+    board_name = CG.active_board_name(board_slug)
     db = CG.kanban_db_path()
     if not db:
-        return {"error": "no kanban database", "lanes": [], "counts": {}}
+        return {"error": "no kanban database", "board": board_slug, "board_name": board_name,
+                "lanes": [], "counts": {}}
     tasks = CG.q(db, "select id, title, status, assignee, created_at, started_at, completed_at, "
                      "body, skills, last_failure_error from tasks where status != 'archived' "
                      "order by created_at desc limit ?", (BOARD_LIMIT,))
@@ -243,7 +246,7 @@ def board_data(include_all=False, older=False):
     counts = {}
     for t in tiles:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
-    return {"generated_at": int(now), "node": platform.node(),
+    return {"generated_at": int(now), "node": platform.node(), "board": board_slug, "board_name": board_name,
             "live": sum(1 for t in tiles if t["active"]), "lanes": lanes, "counts": counts,
             "cards": len(tiles), "test_cards": len(test_cards),
             "attention": attention_data(db, tiles, now)}
@@ -394,22 +397,29 @@ BELL_SVG = ("<svg width=15 height=15 viewBox='0 0 24 24' aria-hidden=true fill=c
             "l-2-2z'/></svg>")
 
 
+def board_title_text(board_name):
+    """The active board's display name (board_data's board_name: board.json "name", else the formatted slug),
+    shown exactly as written; no board name is baked in, an empty one is the generic "Board"."""
+    return (board_name or "").strip() or "Board"
+
+
 def board_page(include_all=False, nonce=None):
     data = board_data(include_all)
     css = CG.dashboard_asset("tokens.css", "crew.css")
+    title_text = board_title_text(data.get("board_name") or data.get("board"))
     if data.get("error"):
-        return ("<!doctype html><meta charset=utf-8><title>crew board</title>%s<style>%s</style>"
-                "<body class=page-board><main>crew board: cannot read the board (%s)</main>"
-                % (CG.favicon_link(), css, esc(data["error"])))
+        return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<style>%s</style>"
+                "<body class=page-board><main>%s: cannot read the board (%s)</main>"
+                % (esc(title_text), CG.favicon_link(), css, esc(title_text), esc(data["error"])))
     return ("<!doctype html><html><head><meta charset=utf-8>"
-            "<meta name=viewport content='width=device-width, initial-scale=1'><title>Crew</title>"
+            "<meta name=viewport content='width=device-width, initial-scale=1'><title>%s</title>"
             "%s<style>%s</style></head><body class=page-board>"
             # One header line, the information the board always carried (owner, 2026-10-01: "use the info we
             # had before but in the nice design"): the LIVE badge (its green dot pulses while the server
             # answers the poll, amber once a poll fails), the card count, how many are working now,
             # the status counts, when it last updated, the bell and the board's own link (crew_card.dashboard_url). The counts are
             # server-rendered so the page reads right before any script; a failed poll shows "stale since".
-            "<header>%s<span class=badge id=badge title='the board server answers'><i></i>LIVE</span><h1>crew board</h1>"
+            "<header>%s<span class=badge id=badge title='the board server answers'><i></i>LIVE</span><h1>%s</h1>"
             "<span class=meta id=cards>%s</span><span class=meta id=live>%s</span>"
             "<div class=stats id=counts>%s</div>"
             "<span class=meta id=when></span><span class=stale id=stale hidden></span>"
@@ -425,7 +435,8 @@ def board_page(include_all=False, nonce=None):
             # to come after them: a `draw(INIT)` placed before board.js ran with no helpers defined
             # yet, and the thrown error left the board empty.
             "<script%s>var INIT=%s;%s;draw(INIT);</script></body></html>"
-            % (CG.favicon_link(), css, CG.logo_link(), cards_word(data.get("cards")), live_word(data.get("live")),
+            % (esc(title_text), CG.favicon_link(), css, CG.logo_link(), esc(title_text),
+               cards_word(data.get("cards")), live_word(data.get("live")),
                board_counts(data.get("counts")), notes_hint(data.get("attention")),
                BELL_SVG, notes_total(data.get("attention")), attention_head(data.get("attention")),
                esc(platform.node()), esc(CG.crew_card.dashboard_url()),
@@ -643,9 +654,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/healthz", "/health"):
             try:
                 board = board_data()
-                body = "ok crew board cards=%s live=%s\n" % (board.get("cards"), board.get("live"))
+                body = "ok %s cards=%s live=%s\n" % (board_title_text(board.get("board_name") or board.get("board")),
+                                                     board.get("cards"), board.get("live"))
             except Exception as exc:
-                body = "ok crew board (no data: %s)\n" % exc
+                body = "ok board (no data: %s)\n" % exc
             return self._send(200, body, "text/plain; charset=utf-8")
         show_all = "all=1" in (urlparse(self.path).query or "")
         nonce = secrets.token_urlsafe(16)

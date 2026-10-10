@@ -18,10 +18,16 @@ from __future__ import annotations
 import html
 import os
 import re
+import socket
+import subprocess
+import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -48,6 +54,109 @@ _FORWARD_RESPONSE_HEADERS = (
 _BOARD_QUERY = ("all",)
 _BOARD_JSON_QUERY = ("all", "older")
 _ACK_QUERY = ("undo",)
+
+
+# Daemon auto-spawn: a Hermes restart does not restart crew_graph_serve, so the proxy starts it on demand.
+DAEMON_READY_TIMEOUT = 2.5          # seconds to wait for a freshly spawned daemon to accept connections
+DAEMON_SPAWN_COOLDOWN = 10.0        # never spawn more than once per this window (a crashing daemon must not fork-bomb)
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_spawn_lock = threading.Lock()
+_last_spawn = {"at": 0.0, "pid": None}
+
+
+def _upstream_host_port() -> tuple[str, int]:
+    parsed = urllib.parse.urlsplit(UPSTREAM)
+    return (parsed.hostname or "127.0.0.1"), (parsed.port or 8799)
+
+
+def _daemon_reachable(timeout: float = 0.5) -> bool:
+    host, port = _upstream_host_port()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _hermes_home() -> str:
+    env = (os.environ.get("HERMES_HOME") or "").strip()
+    if env:
+        return env
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.path.expanduser("~/.hermes")
+
+
+def _serve_script() -> str | None:
+    """crew_graph_serve.py shipped next to this plugin (<plugin>/scripts/). No environment override:
+    a dashboard request may start this one file and nothing else."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "scripts", "crew_graph_serve.py")
+    return path if os.path.isfile(path) else None
+
+
+def _spawn_daemon(script: str, host: str, port: int) -> int | None:
+    home = _hermes_home()
+    env = dict(os.environ)
+    env["HERMES_HOME"] = home
+    env["CREW_GRAPH_BIND"] = host if host != "localhost" else "127.0.0.1"
+    env["CREW_GRAPH_PORT"] = str(port)
+    log_dir = os.path.join(home, "logs")
+    log_fh = None
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        log_fh = open(os.path.join(log_dir, "crew_graph_serve.log"), "ab")
+    except OSError:
+        log_fh = None
+    sink = log_fh if log_fh is not None else subprocess.DEVNULL
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": sink, "stderr": sink, "env": env,
+              "cwd": os.path.dirname(script), "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0x8)
+                                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+                                   | getattr(subprocess, "CREATE_NO_WINDOW", 0x8000000))
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen([sys.executable, script], **kwargs)
+    finally:
+        if log_fh is not None:
+            log_fh.close()
+    return proc.pid
+
+
+def _ensure_daemon_running() -> bool:
+    """True when the crew_graph_serve daemon answers on UPSTREAM; spawn it first when it does not.
+
+    Only a loopback UPSTREAM is spawned (a remote one is not ours to start). Spawns are serialized
+    and rate-limited; after a spawn it waits up to DAEMON_READY_TIMEOUT seconds for the port.
+    """
+    if _daemon_reachable():
+        return True
+    host, port = _upstream_host_port()
+    if host.lower() not in _LOOPBACK_HOSTS or os.environ.get("CREW_DAEMON_AUTOSPAWN", "1") == "0":
+        return False
+    with _spawn_lock:
+        if _daemon_reachable():
+            return True
+        now = time.monotonic()
+        if now - _last_spawn["at"] >= DAEMON_SPAWN_COOLDOWN:
+            script = _serve_script()
+            if not script:
+                return False
+            try:
+                _last_spawn["pid"] = _spawn_daemon(script, host, port)
+            except OSError:
+                return False
+            _last_spawn["at"] = now
+        deadline = time.monotonic() + DAEMON_READY_TIMEOUT
+        while time.monotonic() < deadline:
+            if _daemon_reachable(timeout=0.25):
+                return True
+            time.sleep(0.1)
+        return _daemon_reachable()
 
 
 def _sanitize_color(val: str | None) -> str | None:
@@ -272,7 +381,7 @@ def _rewrite_html(raw_html: str, request: Request, csp: str | None) -> str:
     return raw_html.replace("<head>", head, 1)
 
 
-def _forward_request(url: str, request: Request, body: bytes | None = None) -> Response:
+def _forward_once(url: str, request: Request, body: bytes | None = None) -> Response:
     req = urllib.request.Request(url, data=body, method=request.method)
 
     # Host and Origin name the upstream itself, so crew_graph_serve's Host allowlist and its
@@ -312,28 +421,46 @@ def _forward_request(url: str, request: Request, body: bytes | None = None) -> R
         return Response(
             content=(
                 "<html><body><h3>Crew Dashboard Unavailable</h3><p>Could not reach "
-                f"{html.escape(UPSTREAM)} ({html.escape(str(exc))}). Ensure the crew daemon is running.</p></body></html>"
+                f"{html.escape(UPSTREAM)} ({html.escape(str(exc))}). The crew daemon is not running: the proxy "
+                "tried to start crew_graph_serve.py (see $HERMES_HOME/logs/crew_graph_serve.log), or start the "
+                "crew dashboard service install.py sets up.</p></body></html>"
             ),
             status_code=502,
+            headers={"X-Crew-Upstream": "unreachable"},
             media_type="text/html",
         )
 
 
+def _forward_request(url: str, request: Request, body: bytes | None = None) -> Response:
+    """Forward to the local daemon, starting it first when it is down; retry once after a spawn."""
+    _ensure_daemon_running()
+    res = _forward_once(url, request, body)
+    if res.status_code == 502 and res.headers.get("X-Crew-Upstream") == "unreachable":
+        if _ensure_daemon_running():
+            res = _forward_once(url, request, body)
+    return res
+
+
+async def _proxy(url: str, request: Request, body: bytes | None = None) -> Response:
+    # urllib + a possible spawn wait block: keep them off the dashboard's event loop.
+    return await run_in_threadpool(_forward_request, url, request, body)
+
+
 @router.get("/board")
 async def get_board(request: Request):
-    return _forward_request(f"{UPSTREAM}/" + _upstream_query(request, _BOARD_QUERY), request)
+    return await _proxy(f"{UPSTREAM}/" + _upstream_query(request, _BOARD_QUERY), request)
 
 
 @router.get("/board.json")
 async def get_board_json(request: Request):
-    return _forward_request(f"{UPSTREAM}/board.json" + _upstream_query(request, _BOARD_JSON_QUERY), request)
+    return await _proxy(f"{UPSTREAM}/board.json" + _upstream_query(request, _BOARD_JSON_QUERY), request)
 
 
 @router.get("/card/{card_id}")
 async def get_card(card_id: str, request: Request):
     if not _CARD_ID_RE.match(card_id):
         raise HTTPException(status_code=400, detail="Invalid card ID format")
-    return _forward_request(f"{UPSTREAM}/card/{urllib.parse.quote(card_id, safe='.')}", request)
+    return await _proxy(f"{UPSTREAM}/card/{urllib.parse.quote(card_id, safe='.')}", request)
 
 
 @router.post("/ack/{action}")
@@ -342,16 +469,16 @@ async def post_ack(action: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid ack target format")
     body = await request.body()
     target = f"{UPSTREAM}/ack/{urllib.parse.quote(action, safe='')}" + _upstream_query(request, _ACK_QUERY)
-    return _forward_request(target, request, body=body)
+    return await _proxy(target, request, body=body)
 
 
 @router.get("/avatars/{avatar_path:path}")
 async def get_avatars(avatar_path: str, request: Request):
     if ".." in avatar_path or not _AVATAR_PATH_RE.match(avatar_path):
         raise HTTPException(status_code=400, detail="Invalid avatar asset path")
-    return _forward_request(f"{UPSTREAM}/avatars/{urllib.parse.quote(avatar_path, safe='/')}", request)
+    return await _proxy(f"{UPSTREAM}/avatars/{urllib.parse.quote(avatar_path, safe='/')}", request)
 
 
 @router.get("/healthz")
 async def get_healthz(request: Request):
-    return _forward_request(f"{UPSTREAM}/healthz", request)
+    return await _proxy(f"{UPSTREAM}/healthz", request)
