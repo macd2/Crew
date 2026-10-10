@@ -296,6 +296,53 @@ def kanban_db():
     return _kanban_db_fallback()
 
 
+def active_board_slug():
+    """The board the dashboard shows: HERMES_KANBAN_BOARD, else crew.board in config.yaml, else the
+    kanban/current pointer Hermes writes on `hermes kanban boards switch`, else "default"."""
+    slug = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if not slug:
+        slug = (config_value("board") or "").strip()
+    if slug:
+        return slug
+    try:
+        with open(os.path.join(kanban_home(), "kanban", "current"), "r", encoding="utf-8") as fh:
+            slug = fh.read().strip()
+    except OSError:
+        slug = ""
+    return slug or DEFAULT_BOARD
+
+
+def formatted_board_slug(slug):
+    """A board with no configured name reads as its Title Case slug plus " Board" ("default" -> "Default Board",
+    "skills-kb" -> "Skills Kb Board"); an empty slug is just "Board"."""
+    words = " ".join(w.capitalize() for w in (slug or "").replace("_", "-").split("-") if w)
+    if not words:
+        return "Board"
+    return words if words.lower().endswith(" board") or words.lower() == "board" else words + " Board"
+
+
+def active_board_name(slug=None):
+    """The board's display name: the "name" in kanban/boards/<slug>/board.json (kanban/board.json for
+    the default board), else the formatted slug. Read live on every call, so a rename shows at once."""
+    slug = (slug or active_board_slug() or "").strip()
+    k_home = os.path.join(kanban_home(), "kanban")
+    paths = []
+    safe = _valid_board_slug(slug)
+    if safe:
+        paths.append(os.path.join(k_home, "boards", safe, "board.json"))
+    if slug == DEFAULT_BOARD:
+        paths.append(os.path.join(k_home, "board.json"))
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8-sig") as fh:
+                name = (json.load(fh).get("name") or "").strip()
+            if name:
+                return name
+        except (OSError, ValueError, AttributeError):
+            pass
+    return formatted_board_slug(slug)
+
+
 def card_row(card_id):
     db = kanban_db()
     if not db:
