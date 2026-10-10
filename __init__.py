@@ -82,43 +82,9 @@ def _hermes_bin():
 
 
 def _tasks_db():
-    for env in ("HERMES_KANBAN_DB", "KANBAN_DB"):
-        v = (os.environ.get(env) or "").strip()
-        if v and os.path.exists(v):
-            return v
-    k_home = os.path.join(HOME, "kanban")
-    board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
-    if board_env:
-        if board_env == "default":
-            p = os.path.join(HOME, "kanban.db")
-            if os.path.exists(p):
-                return p
-        b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
-        if os.path.exists(b_path):
-            return b_path
-    cur_ptr = os.path.join(k_home, "current")
-    if os.path.exists(cur_ptr):
-        try:
-            with open(cur_ptr, "r", encoding="utf-8") as f:
-                slug = f.read().strip()
-            if slug == "default":
-                p = os.path.join(HOME, "kanban.db")
-                if os.path.exists(p):
-                    return p
-            elif slug:
-                b_path = os.path.join(k_home, "boards", slug, "kanban.db")
-                if os.path.exists(b_path):
-                    return b_path
-        except Exception:
-            pass
-    candidates = [
-        os.path.join(HOME, "kanban.db"),
-        os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db"),
-    ]
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    return None
+    """The active board's kanban.db, or None: scripts/crew_card.py kanban_db() is the one resolver."""
+    resolve = getattr(_card_tool(), "kanban_db", None)
+    return resolve() if callable(resolve) else None
 
 
 def _card_body(task_id):

@@ -75,38 +75,8 @@ def base_home():
 
 
 def kanban_db_path():
-    for env in ("HERMES_KANBAN_DB", "KANBAN_DB"):
-        v = (os.environ.get(env) or "").strip()
-        if v and os.path.exists(v):
-            return v
-    base = base_home()
-    k_home = os.path.join(base, "kanban")
-    board_env = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
-    if board_env:
-        if board_env == "default":
-            p = os.path.join(base, "kanban.db")
-            if os.path.exists(p):
-                return p
-        b_path = os.path.join(k_home, "boards", board_env, "kanban.db")
-        if os.path.exists(b_path):
-            return b_path
-    cur_ptr = os.path.join(k_home, "current")
-    if os.path.exists(cur_ptr):
-        try:
-            with open(cur_ptr, "r", encoding="utf-8") as f:
-                slug = f.read().strip()
-            if slug == "default":
-                p = os.path.join(base, "kanban.db")
-                if os.path.exists(p):
-                    return p
-            elif slug:
-                b_path = os.path.join(k_home, "boards", slug, "kanban.db")
-                if os.path.exists(b_path):
-                    return b_path
-        except Exception:
-            pass
-    p = os.path.join(base, "kanban.db")
-    return p if os.path.exists(p) else None
+    """The active board's kanban.db, or None: crew_card.kanban_db() is the one resolver."""
+    return crew_card.kanban_db()
 
 
 def profile_home(profile):
