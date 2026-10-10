@@ -1,4 +1,15 @@
-// Hand-written React component registering Crew with Hermes Dashboard SDK.
+// Crew tab for the Hermes dashboard.
+//
+// Hand-written ES5 against window.__HERMES_PLUGIN_SDK__ - there is no build step;
+// this file is shipped as-is (manifest.json "entry").
+//
+// Auth: /api/plugins/crew/* sits behind Hermes's auth middleware, and a plain
+// iframe navigation carries no session header (401 in token mode). So every
+// page is fetched with SDK.authedFetch and rendered into the iframe via srcDoc.
+// Inside the iframe, the bridge script plugin_api.py injects routes the page's
+// own requests through the same authedFetch and turns a click on a board/card
+// link into a "crew:navigate" message, which this component answers by fetching
+// that page the same way. No credential is ever placed in the iframe.
 (function () {
   "use strict";
 
@@ -7,34 +18,43 @@
   var React = SDK.React;
   var h = React.createElement;
 
+  var API = "/api/plugins/crew/";
+  // The pages the tab may show: the board (optionally ?all=1) and one card's graph.
+  var PAGE_RE = /^(board|card\/[A-Za-z0-9_-]+)(\?all=1)?$/;
+
+  function themeQuery() {
+    var style = window.getComputedStyle(document.documentElement);
+    var rawBg = style.getPropertyValue("--background-base").trim() || style.getPropertyValue("--background").trim() || "";
+    var rawFg = style.getPropertyValue("--foreground-base").trim() || style.getPropertyValue("--foreground").trim() || "";
+    var isDark = !rawBg || rawBg.toLowerCase().indexOf("fff") === -1;
+    var bg = rawBg.charAt(0) === "#" ? rawBg : (isDark ? "#041c1c" : "#ffffff");
+    var fg = rawFg.charAt(0) === "#" ? rawFg : (isDark ? "#ffffff" : "#17171a");
+    return "theme=" + encodeURIComponent(isDark ? "dark" : "light") +
+      "&bg=" + encodeURIComponent(bg) + "&fg=" + encodeURIComponent(fg);
+  }
+
   function CrewPage() {
     var iframeRef = React.useRef(null);
+    var pageState = React.useState("board");
+    var page = pageState[0];
+    var setPage = pageState[1];
+
     var htmlState = React.useState("");
     var html = htmlState[0];
     var setHtml = htmlState[1];
 
     var loadingState = React.useState(true);
-    var loading = loadingState[0];
     var setLoading = loadingState[1];
 
     var errorState = React.useState(null);
     var error = errorState[0];
     var setError = errorState[1];
 
-    var loadBoard = React.useCallback(function () {
+    var loadPage = React.useCallback(function () {
       setLoading(true);
       setError(null);
-      var fetchFn = (SDK && SDK.authedFetch) || window.fetch;
-      var style = window.getComputedStyle(document.documentElement);
-      var rawBg = style.getPropertyValue("--background-base").trim() || style.getPropertyValue("--background").trim() || "";
-      var rawFg = style.getPropertyValue("--foreground-base").trim() || style.getPropertyValue("--foreground").trim() || "";
-      var isDark = !rawBg || rawBg.toLowerCase().indexOf("fff") === -1;
-      var theme = isDark ? "dark" : "light";
-      var bg = rawBg.startsWith("#") ? rawBg : (isDark ? "#041c1c" : "#ffffff");
-      var fg = rawFg.startsWith("#") ? rawFg : (isDark ? "#ffffff" : "#17171a");
-      var query = "?theme=" + encodeURIComponent(theme) + "&bg=" + encodeURIComponent(bg) + "&fg=" + encodeURIComponent(fg);
-
-      fetchFn("/api/plugins/crew/board" + query)
+      var url = API + page + (page.indexOf("?") === -1 ? "?" : "&") + themeQuery();
+      SDK.authedFetch(url)
         .then(function (res) {
           if (!res.ok) {
             throw new Error("HTTP " + res.status);
@@ -47,14 +67,28 @@
           setError(null);
         })
         .catch(function (err) {
+          setHtml("");
           setError(err.message || String(err));
           setLoading(false);
         });
-    }, []);
+    }, [page]);
 
     React.useEffect(function () {
-      loadBoard();
-    }, [loadBoard]);
+      loadPage();
+    }, [loadPage]);
+
+    // Board/card links clicked inside the srcdoc page arrive here (see the bridge in plugin_api.py).
+    React.useEffect(function () {
+      function onMessage(e) {
+        var frame = iframeRef.current;
+        if (!frame || e.source !== frame.contentWindow || e.origin !== window.location.origin) return;
+        var d = e.data;
+        if (!d || d.type !== "crew:navigate" || typeof d.path !== "string" || !PAGE_RE.test(d.path)) return;
+        setPage(d.path);
+      }
+      window.addEventListener("message", onMessage);
+      return function () { window.removeEventListener("message", onMessage); };
+    }, []);
 
     if (error && !html) {
       return h("div", {
@@ -75,7 +109,7 @@
           "Could not load the Crew board (" + error + "). Make sure the crew daemon is running on 127.0.0.1:8799."
         ),
         h("button", {
-          onClick: loadBoard,
+          onClick: page === "board" ? loadPage : function () { setPage("board"); },
           style: {
             padding: "0.5rem 1.25rem",
             backgroundColor: "var(--primary, #34d399)",
@@ -85,7 +119,7 @@
             fontWeight: 600,
             cursor: "pointer"
           }
-        }, "Retry")
+        }, page === "board" ? "Retry" : "Back to board")
       );
     }
 
