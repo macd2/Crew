@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crew card tool: open contract cards on the kanban board and record verifier verdicts.
+"""Crew card tool: open contract cards on the kanban board and record verifier verdicts. (v0.8.1)
 
 Deterministic, stdlib only. Used by the plugin's kanban_create hooks, by the coordinator loop and by the
 crew-verifier profile. The contract gate lives here, not only in a prompt: a card is refused
