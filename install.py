@@ -87,7 +87,7 @@ ROLE_FILES = ["roles.json", "briefs/coordinator.md", "briefs/worker.md", "briefs
 
 
 def hermes_bin():
-    return shutil.which("hermes") or os.path.expanduser("~/.local/bin/hermes")
+    return os.environ.get("HERMES_BIN") or shutil.which("hermes") or os.path.expanduser("~/.local/bin/hermes")
 
 
 def python3_bin():
