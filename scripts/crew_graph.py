@@ -75,11 +75,8 @@ def base_home():
 
 
 def kanban_db_path():
-    env = os.environ.get("KANBAN_DB") or ""
-    if env and os.path.exists(env):
-        return env
-    p = os.path.join(base_home(), "kanban.db")
-    return p if os.path.exists(p) else None
+    """The active board's kanban.db, or None: crew_card.kanban_db() is the one resolver."""
+    return crew_card.kanban_db()
 
 
 def profile_home(profile):

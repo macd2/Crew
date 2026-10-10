@@ -82,16 +82,9 @@ def _hermes_bin():
 
 
 def _tasks_db():
-    candidates = [
-        os.environ.get("HERMES_KANBAN_DB") or "",
-        os.environ.get("KANBAN_DB") or "",
-        os.path.join(HOME, "kanban.db"),
-        os.path.join(os.path.expanduser("~"), ".hermes", "kanban.db"),
-    ]
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    return None
+    """The active board's kanban.db, or None: scripts/crew_card.py kanban_db() is the one resolver."""
+    resolve = getattr(_card_tool(), "kanban_db", None)
+    return resolve() if callable(resolve) else None
 
 
 def _card_body(task_id):
