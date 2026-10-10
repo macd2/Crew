@@ -1,0 +1,13 @@
+{
+  "name": "crew",
+  "label": "Crew",
+  "description": "Autonomous proof-gated coordination board and live flow graph",
+  "icon": "Users",
+  "version": "0.8.1",
+  "tab": {
+    "path": "/crew",
+    "position": "after:openspec"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
