@@ -16,6 +16,35 @@ function avatar(name, hue){
   return '<span class="avatar" style="--hue:'+esc(hue||"var(--crew-text-3)")+'">?</span>'; }
 function hhmm(d){ function p(x){ return (x<10?"0":"")+x; } return p(d.getHours())+":"+p(d.getMinutes()); }
 
+function applyDynamicTheme(theme, bg, fg){
+  theme = theme || "dark";
+  if(!bg){
+    bg = (theme === "light") ? "#ffffff" : "#041c1c";
+  }
+  if(!fg){
+    fg = (theme === "light") ? "#17171a" : "#ffffff";
+  }
+  var s=document.getElementById("hermes-theme-sync");
+  if(!s){ s=document.createElement("style"); s.id="hermes-theme-sync"; document.head.appendChild(s); }
+  s.textContent=":root { color-scheme: "+theme+" !important; --crew-scheme: "+theme+" !important; --crew-bg: "+bg+" !important; --color-background: "+bg+" !important; --crew-fg: "+fg+" !important; --color-foreground: "+fg+" !important; } html, body, main#board { background-color: "+bg+" !important; color: "+fg+" !important; }";
+}
+try {
+  var _sp = new URLSearchParams(location.search);
+  if(_sp.get("bg") || _sp.get("theme")) applyDynamicTheme(_sp.get("theme"), _sp.get("bg"), _sp.get("fg"));
+  window.addEventListener("message", function(e){
+    if(e && e.data && e.data.type === "hermes:theme"){
+      applyDynamicTheme(e.data.theme, e.data.bg, e.data.fg);
+      try {
+        var url = new URL(location.href);
+        if(e.data.theme) url.searchParams.set("theme", e.data.theme);
+        if(e.data.bg) url.searchParams.set("bg", e.data.bg);
+        if(e.data.fg) url.searchParams.set("fg", e.data.fg);
+        history.replaceState(null, "", url.toString());
+      } catch(err){}
+    }
+  });
+} catch(e){}
+
 function ahead(att){ return 'needs you - <b>'+(+att.stuck||0)+'</b> stuck - <b>'+(+att.done||0)+'</b> done'; }
 function drawNotes(att){
   var bell=document.getElementById("bell"), n=document.getElementById("belln");
@@ -32,11 +61,29 @@ function drawNotes(att){
   rows.forEach(function(r){
     var stuck=(r.status!=="done");
     var d=document.createElement("div"); d.className="ar"+(stuck?" stuck":"");
+    var q = location.search ? location.search : "";
     d.innerHTML='<span class="st">'+esc(r.status)+'</span>'+
-      '<a class="t" href="/card/'+esc(r.id)+'">'+esc(r.id)+' - '+esc(r.title||"(untitled)")+'</a>'+
+      '<a class="t" href="/card/'+esc(r.id)+q+'">'+esc(r.id)+' - '+esc(r.title||"(untitled)")+'</a>'+
       '<span class="w">'+esc(r.who||"-")+'</span><span class="ag">'+fmt(+r.age_s)+'</span>';
     var b=document.createElement("button"); b.textContent="✕"; b.title="clear this one";
-    b.onclick=function(){ fetch(r.ack_url,{method:"POST",cache:"no-store"}).then(tick); d.remove(); };
+    b.onclick=function(){
+      fetch(r.ack_url,{method:"POST",cache:"no-store"}).then(function(res){
+        if(res.ok){
+          d.remove();
+          var belln=document.getElementById("belln");
+          if(belln){
+            var cur = parseInt(belln.textContent||"0", 10);
+            if(cur > 1) { belln.textContent = cur - 1; }
+            else {
+              belln.textContent = '0';
+              var bell=document.getElementById("bell");
+              if(bell){ bell.className="bell"; bell.title="nothing waiting"; }
+            }
+          }
+        }
+        tick();
+      }).catch(function(){ tick(); });
+    };
     d.appendChild(b);
     list.appendChild(d);
   });
@@ -49,7 +96,19 @@ function wireNotes(){
     if(!box.hidden && !box.contains(e.target) && e.target!==bell) box.hidden=true; });
   document.addEventListener("keydown", function(e){ if(e.key==="Escape") box.hidden=true; });
   var ca=document.getElementById("clearall");
-  if(ca) ca.onclick=function(){ fetch("/ack/all",{method:"POST",cache:"no-store"}).then(tick); };
+  if(ca) ca.onclick=function(){
+    fetch("/ack/all",{method:"POST",cache:"no-store"}).then(function(r){
+      if(r.ok){
+        var rows=document.getElementById("noterows");
+        if(rows) rows.innerHTML='<div class="empty">nothing waiting</div>';
+        var belln=document.getElementById("belln");
+        if(belln) belln.textContent='0';
+        var bell=document.getElementById("bell");
+        if(bell){ bell.className="bell"; bell.title="nothing waiting"; }
+      }
+      tick();
+    }).catch(function(){ tick(); });
+  };
 }
 
 function drawCounts(c){
@@ -58,7 +117,22 @@ function drawCounts(c){
     var n=h[2].reduce(function(a,s){ return a+(c[s]||0); },0);
     return '<span class="'+h[0]+(n?'':' none')+'"><b>'+n+'</b>'+h[1]+'</span>'; }).join("");
 }
+
+// The active board's display name as /board.json serves it (board_name: board.json "name", else the formatted
+// slug; then the slug), shown exactly as written. No board name is baked in: an empty payload reads "Board".
+function boardTitle(d){
+  var name = d && (d.board_name || d.board);
+  name = name ? String(name).trim() : "";
+  return name || "Board";
+}
+
 function drawHeader(d){
+  var title = boardTitle(d);
+  var h1=document.querySelector("header h1");
+  if(h1){
+    h1.textContent = title;
+  }
+  document.title = title;
   var c=document.getElementById("cards"); if(c) c.textContent=d.cards+" card"+(d.cards===1?"":"s");
   var l=document.getElementById("live"); if(l){ l.textContent=d.live ? d.live+" working now" : "nothing running";
     l.className="meta"+(d.live?" on":""); }
@@ -95,8 +169,12 @@ function cardHTML(t){
     Math.round(b.pct)+'%</span>';
   r += '<span title="time in this state">'+fmt(t.settled_s!==null&&t.settled_s!==undefined?t.settled_s:t.age_s)+'</span>'+
        '<span class="id" title="'+esc(t.id)+'">'+esc(shortId(t.id))+'</span>';
-  var motion = t.active ? (t.active.quiet_s!==null && t.active.quiet_s>QUIET_S ? " quiet" : " live") : "";
-  return '<a class="card'+motion+'" data-id="'+esc(t.id)+'" href="/card/'+esc(t.id)+'" style="--tone:'+esc(tone)+'">'+
+  var isRunning = t.status === "running" || !!t.active;
+  var motion = isRunning
+    ? (t.active && t.active.quiet_s !== null && t.active.quiet_s !== undefined && t.active.quiet_s > QUIET_S ? " quiet" : " live")
+    : "";
+  var q = location.search ? location.search : "";
+  return '<a class="card'+motion+'" data-id="'+esc(t.id)+'" href="/card/'+esc(t.id)+q+'" style="--tone:'+esc(tone)+'">'+
     '<div class="ti">'+esc(t.title||"(untitled)")+'</div>'+
     (t.summary?'<div class="su">'+esc(t.summary)+'</div>':'')+
     '<div class="ft">'+left+'<span class="r">'+r+'</span></div></a>';
@@ -120,6 +198,9 @@ function laneHTML(l){
 function draw(d){
   if(!d || !d.lanes) return;
   LAST = d;
+  if(d.board && window.parent && window.parent!==window){
+    try { window.parent.postMessage({ type: 'hermes:board-info', board: d.board, board_name: boardTitle(d) }, '*'); } catch(e){}
+  }
   drawHeader(d);
   drawCounts(d.counts||{});
   drawNotes(d.attention);

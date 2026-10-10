@@ -5,6 +5,51 @@ var POLL_MS = 2000;
 var NS = "http" + ":" + "//www.w3.org/2000/svg";
 var COLOUR = %(colours)s;
 var CHIP = {pending:"var(--crew-tone-review)", ok:"var(--crew-tone-neutral)", err:"var(--crew-tone-blocked)"};
+
+function applyDynamicTheme(theme, bg, fg){
+  theme = theme || "dark";
+  if(!bg){
+    bg = (theme === "light") ? "#ffffff" : "#041c1c";
+  }
+  if(!fg){
+    fg = (theme === "light") ? "#17171a" : "#ffffff";
+  }
+  var s=document.getElementById("hermes-theme-sync");
+  if(!s){ s=document.createElement("style"); s.id="hermes-theme-sync"; document.head.appendChild(s); }
+  s.textContent=":root { color-scheme: "+theme+" !important; --crew-scheme: "+theme+" !important; --crew-bg: "+bg+" !important; --color-background: "+bg+" !important; --crew-fg: "+fg+" !important; --color-foreground: "+fg+" !important; } html, body, main, #main, .page-card { background-color: "+bg+" !important; color: "+fg+" !important; }";
+  preserveThemeLinks();
+}
+function preserveThemeLinks(){
+  var q = location.search ? location.search : "";
+  if(!q) return;
+  document.querySelectorAll('a[href="/"], a[href="board"], a[href^="/board"], a.railbtn, a.brand').forEach(function(a){
+    var href = a.getAttribute("href");
+    if(href && href.indexOf("?") === -1){
+      a.setAttribute("href", href + q);
+    }
+  });
+}
+try {
+  var _sp = new URLSearchParams(location.search);
+  if(_sp.get("bg") || _sp.get("theme")) applyDynamicTheme(_sp.get("theme"), _sp.get("bg"), _sp.get("fg"));
+  window.addEventListener("message", function(e){
+    if(e && e.data && e.data.type === "hermes:theme"){
+      applyDynamicTheme(e.data.theme, e.data.bg, e.data.fg);
+      try {
+        var url = new URL(location.href);
+        if(e.data.theme) url.searchParams.set("theme", e.data.theme);
+        if(e.data.bg) url.searchParams.set("bg", e.data.bg);
+        if(e.data.fg) url.searchParams.set("fg", e.data.fg);
+        history.replaceState(null, "", url.toString());
+      } catch(err){}
+    }
+  });
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", preserveThemeLinks);
+  } else {
+    preserveThemeLinks();
+  }
+} catch(e){}
 // a tool call still in flight ticks a stopwatch beside its chip, like a live terminal counter
 function tickChips(){
   var now = Date.now()/1000;
@@ -1247,7 +1292,11 @@ document.addEventListener("keydown", function(e){
   if(e.code==="Space"){ e.preventDefault(); paused=!paused; updateStatus(); }
   else if(e.key==="r"||e.key==="R"){ refresh(); }
   else if(e.key==="?"){ document.getElementById("help").classList.toggle("open"); }
-  else if(e.key==="o"||e.key==="O"){ window.location.href = "/"; }
+  else if(e.key==="o"||e.key==="O"){
+    var rback = document.querySelector(".rback a");
+    var target = rback ? rback.getAttribute("href") : ("/" + (location.search || ""));
+    window.location.href = target;
+  }
   else if(e.key==="f"){ if(follow){ follow=false; updateStatus(); } userCam = false; fitView(); }
   else if(e.key==="F"){ setFollow(!follow); }
   else if(e.key==="0"){ if(follow){ follow=false; updateStatus(); } userCam = true; resetZoom(); }

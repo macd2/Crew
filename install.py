@@ -79,7 +79,8 @@ RETIRED_SCRIPT_FILES = ["crew_follow.py", "crew_follow_proof.py", "crew_observer
 PLUGIN_FILES = (["plugin.yaml", "__init__.py", "skills/crew-verifier/SKILL.md",
                  "skills/crew-role-worker/SKILL.md", "skills/crew-role-content/SKILL.md",
                  "skills/crew/SKILL.md", "skills/crew-diagnose/SKILL.md",
-                 "dashboard/manifest.json", "dashboard/dist/index.js", "dashboard/plugin_api.py"]
+                 "dashboard/manifest.json", "dashboard/dist/index.js", "dashboard/plugin_api.py",
+                 "desktop/plugin.js"]
                 + ["scripts/" + rel for rel in SCRIPT_FILES])
 # Files the plugin copy once held and the package has since deleted: their presence makes the copy stale.
 PLUGIN_RETIRED_FILES = ["scripts/crew_proofs.sh"]

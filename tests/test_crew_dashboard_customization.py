@@ -239,6 +239,210 @@ class CrewDashboardCustomizationTests(unittest.TestCase):
         self.assertNotIn("<script>x", resp.text)
 
 
+    # Board names the owner has used; none of them may be baked into the title code paths.
+    HARDCODED_NAMES = ("Custom Crew", "Crew Board", "crew board")
+
+    def _read(self, *parts):
+        with open(os.path.join(CREW_ROOT, *parts), "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _load_serve(self):
+        import importlib.util
+        import sys
+        sys.path.insert(0, os.path.join(CREW_ROOT, "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "cgs_test", os.path.join(CREW_ROOT, "scripts", "crew_graph_serve.py"))
+        assert spec is not None and spec.loader is not None
+        cgs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cgs)
+        return cgs
+
+    def _with_home(self, home, fn, board_env=None):
+        keys = ("HERMES_HOME", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB", "KANBAN_DB")
+        saved = {k: os.environ.get(k) for k in keys}
+        os.environ["HERMES_HOME"] = home
+        for k in ("HERMES_KANBAN_DB", "KANBAN_DB"):
+            os.environ.pop(k, None)
+        if board_env is None:
+            os.environ.pop("HERMES_KANBAN_BOARD", None)
+        else:
+            os.environ["HERMES_KANBAN_BOARD"] = board_env
+        try:
+            return fn()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def _make_board(self, home, slug, name=None):
+        import json
+        d = os.path.join(home, "kanban", "boards", slug)
+        os.makedirs(d, exist_ok=True)
+        if name is not None:
+            with open(os.path.join(d, "board.json"), "w", encoding="utf-8-sig") as f:
+                json.dump({"slug": slug, "name": name}, f)
+
+    def _graph(self):
+        import sys
+        sys.path.insert(0, os.path.join(CREW_ROOT, "scripts"))
+        import crew_graph as cg
+        return cg
+
+    def test_no_hardcoded_board_names_in_title_code(self):
+        for parts in (("scripts", "crew_dashboard", "board.js"), ("desktop", "plugin.js"),
+                      ("scripts", "crew_graph_serve.py"), ("scripts", "crew_graph.py")):
+            src = self._read(*parts)
+            for name in self.HARDCODED_NAMES:
+                self.assertNotIn(name, src, "%s hardcodes board name %r" % ("/".join(parts), name))
+        self.assertNotIn("useState('Crew", self._read("desktop", "plugin.js"))
+
+    def test_board_title_text_is_the_name_as_given(self):
+        cgs = self._load_serve()
+        self.assertEqual(cgs.board_title_text("Ops Queue"), "Ops Queue")
+        self.assertEqual(cgs.board_title_text("  skills-kb "), "skills-kb")
+        self.assertEqual(cgs.board_title_text(""), "Board")
+        self.assertEqual(cgs.board_title_text(None), "Board")
+
+    def test_formatted_board_slug_fallback(self):
+        cg = self._graph()
+        self.assertEqual(cg.formatted_board_slug("default"), "Default Board")
+        self.assertEqual(cg.formatted_board_slug("skills-kb"), "Skills Kb Board")
+        self.assertEqual(cg.formatted_board_slug("night_board"), "Night Board")
+        self.assertEqual(cg.formatted_board_slug(""), "Board")
+        self.assertEqual(cg.formatted_board_slug(None), "Board")
+
+    def test_active_board_name_reads_board_json_live(self):
+        import json
+        import tempfile
+        cg = self._graph()
+        with tempfile.TemporaryDirectory() as home:
+            self._make_board(home, "ops", "Ops Queue")
+            self._make_board(home, "bare", "")
+            with open(os.path.join(home, "kanban", "board.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "Main Queue"}, f)
+
+            def check():
+                self.assertEqual(cg.active_board_name("ops"), "Ops Queue")
+                self.assertEqual(cg.active_board_name("bare"), "Bare Board")
+                self.assertEqual(cg.active_board_name("missing-one"), "Missing One Board")
+                self.assertEqual(cg.active_board_name("default"), "Main Queue")
+                # A rename in board.json shows on the next read: nothing is cached or baked in.
+                with open(os.path.join(home, "kanban", "boards", "ops", "board.json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump({"slug": "ops", "name": "Renamed Ops"}, f)
+                self.assertEqual(cg.active_board_name("ops"), "Renamed Ops")
+            self._with_home(home, check)
+
+    def test_active_board_follows_current_pointer(self):
+        import tempfile
+        cg = self._graph()
+        orig = cg.crew_card.config_value
+        cg.crew_card.config_value = lambda *a, **k: None
+        try:
+            with tempfile.TemporaryDirectory() as home:
+                self._make_board(home, "night-shift", "Night Shift Team")
+                with open(os.path.join(home, "kanban", "current"), "w", encoding="utf-8") as f:
+                    f.write("night-shift\n")
+
+                def check():
+                    self.assertEqual(cg.active_board_slug(), "night-shift")
+                    self.assertEqual(cg.active_board_name(), "Night Shift Team")
+                self._with_home(home, check)
+
+                # The env pin wins over the pointer.
+                self._make_board(home, "pinned", "Pinned Name")
+                self._with_home(home, lambda: self.assertEqual(cg.active_board_name(), "Pinned Name"),
+                                board_env="pinned")
+            with tempfile.TemporaryDirectory() as home:
+                # Nothing configured at all: the default board, shown as its formatted slug.
+                def check_default():
+                    self.assertEqual(cg.active_board_slug(), "default")
+                    self.assertEqual(cg.active_board_name(), "Default Board")
+                self._with_home(home, check_default)
+        finally:
+            cg.crew_card.config_value = orig
+
+    def test_board_page_renders_active_board_name(self):
+        import tempfile
+        cgs = self._load_serve()
+        with tempfile.TemporaryDirectory() as home:
+            self._make_board(home, "ops", "Ops Queue")
+
+            def check():
+                orig = cgs.CG.kanban_db_path
+                cgs.CG.kanban_db_path = lambda: None  # board metadata only; no task DB needed
+                try:
+                    data = cgs.board_data()
+                    self.assertEqual(data["board"], "ops")
+                    self.assertEqual(data["board_name"], "Ops Queue")
+                    html = cgs.board_page()
+                finally:
+                    cgs.CG.kanban_db_path = orig
+                self.assertIn("<title>Ops Queue</title>", html)
+                for name in self.HARDCODED_NAMES:
+                    self.assertNotIn(name, html)
+            self._with_home(home, check, board_env="ops")
+
+    def test_frontends_bind_title_to_board_payload(self):
+        board_js = self._read("scripts", "crew_dashboard", "board.js")
+        self.assertIn("d.board_name || d.board", board_js)
+        self.assertIn('return name || "Board"', board_js)
+        self.assertIn("board_name: boardTitle(d)", board_js)
+        self.assertIn("document.title = title", board_js)
+        self.assertIn("h1.textContent = title", board_js)
+
+        plugin_js = self._read("desktop", "plugin.js")
+        self.assertIn("React.useState('Board')", plugin_js)
+        self.assertIn("e.data.board_name || e.data.board", plugin_js)
+        self.assertIn("setBoardTitle(name)", plugin_js)
+        self.assertIn("children: boardTitle", plugin_js)
+        self.assertIn("title: boardTitle", plugin_js)
+
+    def test_daemon_keeps_strict_framing_and_write_checks(self):
+        """crew_graph_serve keeps frame-ancestors 'none' and refuses a write from any other origin,
+        a loopback page on another port included; the proxy, not the daemon, makes /ack same-origin."""
+        cgs = self._load_serve()
+        policy = cgs.csp("n0nce")
+        self.assertIn("frame-ancestors 'none'", policy)
+        for loose in ("file:", "app:", "vscode-file:", "http://127.0.0.1:*", "http://localhost:*"):
+            self.assertNotIn(loose, policy)
+
+        def allowed(host, origin=None, site=None):
+            h = cgs.Handler.__new__(cgs.Handler)
+            hdrs = {"Host": host}
+            if origin is not None:
+                hdrs["Origin"] = origin
+            if site is not None:
+                hdrs["Sec-Fetch-Site"] = site
+            h.headers = hdrs
+            return h._same_origin()
+
+        self.assertTrue(allowed("127.0.0.1:8799", "http://127.0.0.1:8799", "same-origin"))
+        self.assertTrue(allowed("127.0.0.1:8799", "http://127.0.0.1:8799"))
+        self.assertFalse(allowed("127.0.0.1:8799"))                                   # no Origin/Referer
+        self.assertFalse(allowed("127.0.0.1:8799", "http://127.0.0.1:9119", "same-site"))
+        self.assertFalse(allowed("127.0.0.1:8799", "http://localhost:9119"))
+        self.assertFalse(allowed("[::1]:8799", "http://[::1]:9119", "same-site"))
+        self.assertFalse(allowed("127.0.0.1:8799", "https://evil.example", "cross-site"))
+        self.assertFalse(allowed("box.tailnet.ts.net", "http://127.0.0.1:9119", "same-site"))
+
+    def test_board_js_title_resolution_in_node(self):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        src = self._read("scripts", "crew_dashboard", "board.js")
+        start = src.index("function boardTitle(d)")
+        fn = src[start:src.index("\n}", start) + 2]
+        script = fn + (";console.log(JSON.stringify([boardTitle({board:'ops',board_name:'Ops Queue'}),"
+                       "boardTitle({board:'ops'}),boardTitle({board_name:'  '}),boardTitle(null)]))")
+        out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), '["Ops Queue","ops","Board","Board"]')
+
 @unittest.skipUnless(_load_hermes_auth(), "hermes-agent is not installed")
 class HermesTokenAuthTests(unittest.TestCase):
     """The plugin routes behind Hermes's real auth_middleware, as the dashboard mounts them."""
@@ -325,7 +529,9 @@ class LiveUpstreamTests(unittest.TestCase):
     def test_healthz(self):
         resp = self.client.get("/api/plugins/crew/healthz")
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.text.startswith("ok crew board"))
+        # The health line names the active board (here the default board, no board.json: its formatted slug).
+        self.assertTrue(resp.text.startswith("ok "), resp.text)
+        self.assertIn("cards=", resp.text)
 
 
 if __name__ == "__main__":
