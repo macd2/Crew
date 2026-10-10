@@ -5,8 +5,10 @@ Covers the PR #3 review: the escaped public host, the allowlisted routes, the
 middleware, the CSP + nonce on the page the tab renders via srcdoc, and an /ack
 write that reaches a real crew_graph_serve and passes its same-origin check.
 """
+import html
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -205,6 +207,19 @@ class CrewDashboardCustomizationTests(unittest.TestCase):
         # srcdoc never sees response headers: the same policy rides in a <meta>, minus frame-ancestors.
         self.assertIn('<meta http-equiv="Content-Security-Policy" content="default-src', body)
         self.assertNotIn("frame-ancestors", body)
+        # Inside srcdoc 'self' is the dashboard origin: the meta policy's script-src is nonce-only.
+        meta_m = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)"', body)
+        self.assertIsNotNone(meta_m)
+        meta_policy = html.unescape(meta_m.group(1))
+        script_src = re.search(r"script-src[^;]*", meta_policy).group(0)
+        self.assertIn("'nonce-abc123'", script_src)
+        self.assertNotIn("'self'", script_src)
+        self.assertEqual(script_src.split(), ["script-src", "'nonce-abc123'"])
+        # Only script-src loses 'self'; the other directives keep it.
+        self.assertIn("default-src 'self'", meta_policy)
+        self.assertIn("connect-src 'self'", meta_policy)
+        # The header policy is untouched.
+        self.assertIn("script-src 'self' 'nonce-abc123'", csp)
         # The injected bridge carries the page's nonce, so that policy lets it run.
         self.assertIn('<script id="crew-parent-bridge" nonce="abc123">', body)
         self.assertLess(body.index('<base href="/api/plugins/crew/">'), body.index("crew-parent-bridge"))

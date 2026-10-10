@@ -255,6 +255,14 @@ def _rewrite_html(raw_html: str, request: Request, csp: str | None) -> str:
         # A srcdoc document never sees response headers: carry the policy in a <meta> as well.
         # frame-ancestors is ignored (and warned about) in a <meta>, so it stays header-only.
         meta_policy = re.sub(r";?\s*frame-ancestors[^;]*", "", csp).strip("; ")
+        # Inside srcdoc 'self' is the Hermes dashboard origin, so script-src 'self' would let
+        # injected markup load any script the dashboard serves. Crew's scripts are all inline with
+        # the nonce (dashboard_asset inlines lib.js/board.js): the meta script-src is nonce-only.
+        meta_policy = re.sub(
+            r"(script-src)([^;]*)",
+            lambda m: m.group(1) + re.sub(r"\s+'self'(?=\s|$)", "", m.group(2)),
+            meta_policy,
+        )
         head += f'<meta http-equiv="Content-Security-Policy" content="{html.escape(meta_policy, quote=True)}">'
         m = _NONCE_RE.search(csp)
         if m:
