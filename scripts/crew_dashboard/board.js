@@ -72,7 +72,7 @@ function chip(text, tone){ return '<span class="schip" style="--tone:var(--crew-
 function stateHTML(t){
   if(t.active){
     if(t.active.quiet_s!==null && t.active.quiet_s>QUIET_S) return chip("no heartbeat", "review");
-    return chip("working · "+fmt(+t.active.for_s), "running");
+    return chip("working · "+fmt(+t.active.for_s)+(t.active.eta ? " · "+t.active.eta : ""), "running");
   }
   if(t.status==="ready"||t.status==="todo") return chip("queued", "ready");
   if(t.status==="blocked"||t.status==="triage") return chip(t.status==="triage" ? "needs you" : "blocked", "blocked");

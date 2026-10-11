@@ -640,7 +640,7 @@ function panelModel(n){
     var lv = (sess||run||n).live || {};
     m.role = n.role; m.unit = u;
     m.title = cap1(n.role) + " · " + (run ? "run " + (re.run_id!==undefined ? re.run_id : run.label) : (n.kind==="subagent" ? "subagent" : "session"));
-    m.sub = live ? "running " + fmtAgo((run||n).t0 || 0).replace(/ ago$/, "") + (lv.tool ? " · " + lv.tool : "")
+    m.sub = live ? "running " + fmtAgo((run||n).t0 || 0).replace(/ ago$/, "") + (re.eta_text ? " · " + re.eta_text.replace(/ left$/, "") : "") + (lv.tool ? " · " + lv.tool : "")
                  : (re.profile || se.profile_name || "") + (re.ended_at || (sess||{}).t1 ? " · ended " + hhmm(re.ended_at || sess.t1) : "");
     if(other) m.sub += " · card " + other;
     var outcome = re.outcome || (sess||n).status;

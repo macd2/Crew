@@ -185,6 +185,7 @@ def board_data(include_all=False, older=False):
     now = time.time()
     tiles = []
     facts = {}
+    dur_cache = {}
     for tid, title, status, assignee, created, started, completed, body, skills, lfe in tasks:
         facts[tid] = (body or "", lfe)
         my_runs = runs.get(tid, [])
@@ -193,9 +194,14 @@ def board_data(include_all=False, older=False):
         role = CG.card_role(body or "", skills) or CG.profile_role(profile, "worker")
         if live:
             beat = live[0][6] or live[0][4]
-            active = {"profile": profile, "run": live[0][0],
-                      "for_s": int(now - (live[0][4] or now)),
-                      "quiet_s": int(now - (beat or now)) if beat else None}
+            for_s = int(now - (live[0][4] or now))
+            # the board tile estimates from the role's past run lengths only - no per-tile session read,
+            # so a board of many live cards stays cheap; the card page carries the full milestone ETA
+            if profile not in dur_cache:
+                dur_cache[profile] = CG.role_durations(db, profile)
+            active = {"profile": profile, "run": live[0][0], "for_s": for_s,
+                      "quiet_s": int(now - (beat or now)) if beat else None,
+                      "eta": CG.short_eta(CG.estimate_run_eta(for_s, None, dur_cache[profile], []))}
         else:
             active = None
         ended = completed or (my_runs[-1][5] if my_runs and my_runs[-1][5] else None)
