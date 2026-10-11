@@ -165,6 +165,19 @@ class CreateGuardTests(IntakeCase):
         os.environ["HERMES_KANBAN_TASK"] = "t_parent"
         self.assertIsNone(self.guard())
 
+    def test_a_child_card_created_with_parents_is_not_gated(self):
+        # no /crew turn and no HERMES_KANBAN_TASK: the parents link alone marks a decomposition child
+        res = self.plug.crew_tool_guard(
+            tool_name="kanban_create", session_id="S1", turn_id="T1",
+            args={"title": "Status page", "assignee": "crew-worker", "body": BODY, "parents": ["t_parent"]})
+        self.assertIsNone(res)
+
+    def test_an_empty_parents_list_is_still_gated(self):
+        res = self.plug.crew_tool_guard(
+            tool_name="kanban_create", session_id="S1", turn_id="T1",
+            args={"title": "Status page", "assignee": "crew-worker", "body": BODY, "parents": []})
+        self.assertEqual("block", res["action"])
+
     def test_a_guard_error_blocks_instead_of_letting_the_call_through(self):
         self.open_intake()
         self.plug._create_guard = lambda *a, **k: 1 / 0

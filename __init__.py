@@ -1062,10 +1062,10 @@ def _create_guard(args, session_id, turn_id):
     and the budget floor are the plugin's and never the model's guess, plus assignee, skills, runtime and the
     model pin) or None when the call is not a crew card. A coordinator or worker process (HERMES_KANBAN_TASK
     set) may create children: crew_card.py plan validates those."""
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    args = args if isinstance(args, dict) else {}
+    if os.environ.get("HERMES_KANBAN_TASK") or args.get("parents"):
         return None
     tool = _card_tool()
-    args = args if isinstance(args, dict) else {}
     if tool is None:
         if str(args.get("assignee") or "").startswith("crew-"):
             return _create_refusal("crew_card.py not found - run the installer.")
