@@ -264,13 +264,13 @@ def estimate_run_eta(elapsed_s, steps_now, durs, steps_hist, min_n=ETA_MIN_N):
 
 
 def fmt_eta(eta):
-    """One honest sentence for a card's ETA (the /crew-graph --eta line and copy); '' when nothing is known."""
+    """One honest sentence for a card's ETA (the /crew-graph --eta line and copy); '' when nothing is known.
+
+    A single expected time remaining - the worker's own pace blended with its role's typical length - then,
+    after it, what that number was built from, so the reader can see the reasoning behind the guess."""
     if not eta or eta.get("basis") == "none" or eta.get("remaining_s") is None:
         role_n = (eta or {}).get("dur_n", 0)
         return "no baseline yet (n=%s)" % role_n if eta else ""
-    lo, hi, rem = eta.get("lo_s"), eta.get("hi_s"), eta.get("remaining_s")
-    band = "%s-%s" % (fmt_dur_str(lo), fmt_dur_str(hi)) if lo is not None and hi is not None and hi > lo \
-        else fmt_dur_str(rem)
     if eta["basis"] == "milestone":
         detail = "worker ran %s, step %s/%s typical" % (
             fmt_dur_str(eta["elapsed_s"]), eta.get("steps_now"), eta.get("step_median"))
@@ -280,7 +280,7 @@ def fmt_eta(eta):
     else:
         detail = "worker ran %s, no length history for the role" % fmt_dur_str(eta["elapsed_s"])
     tail = "; n=%d" % max(eta.get("dur_n", 0), eta.get("step_n", 0))
-    return "~%s left (%s%s)" % (band, detail, tail)
+    return "~%s remaining (%s%s)" % (fmt_dur_str(eta["remaining_s"]), detail, tail)
 
 
 def fmt_dur_str(sec):
@@ -296,13 +296,14 @@ def fmt_dur_str(sec):
 
 
 def short_eta(eta):
-    """The compact chip form the dashboard shows next to a running worker: '~6-14m left' or ''."""
+    """The compact chip form the dashboard shows next to a running worker: '~6m remaining' or ''.
+
+    One number, not a band: the best single guess at how much longer the worker needs. A spread read off a
+    thin history looks like a contradiction on a glanceable chip, so the chip shows the point estimate and
+    the word 'remaining' says plainly what it is."""
     if not eta or eta.get("basis") == "none" or eta.get("remaining_s") is None:
         return ""
-    lo, hi = eta.get("lo_s"), eta.get("hi_s")
-    if lo is not None and hi is not None and hi > lo:
-        return "~%s left" % fmt_dur_str(lo) if lo == hi else "~%s-%s left" % (fmt_dur_str(lo), fmt_dur_str(hi))
-    return "~%s left" % fmt_dur_str(eta["remaining_s"])
+    return "~%s remaining" % fmt_dur_str(eta["remaining_s"])
 
 
 def live_run_eta(board_db, card_row, run_row):

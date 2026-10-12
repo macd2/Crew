@@ -83,14 +83,16 @@ class EstimateMath(unittest.TestCase):
 
 
 class Formatters(unittest.TestCase):
-    def test_short_eta_has_band_and_suffix(self):
+    def test_short_eta_is_one_number_saying_remaining(self):
         e = cg.estimate_run_eta(200, 9, DURS, STEPS)
         s = cg.short_eta(e)
         self.assertTrue(s.startswith("~"))
-        self.assertTrue(s.endswith("left"))
+        self.assertTrue(s.endswith("remaining"))
+        self.assertNotIn("-", s[1:].split(" ")[0])  # the duration part is one value, not a "a-b" band
 
     def test_fmt_eta_names_basis_detail(self):
         e = cg.estimate_run_eta(200, 9, DURS, STEPS)
+        self.assertIn("remaining", cg.fmt_eta(e))
         self.assertIn("step", cg.fmt_eta(e))
         self.assertIn("n=", cg.fmt_eta(e))
 
