@@ -1013,8 +1013,8 @@ def hermes_python(root=None):
         from pm.environments import committed_venv
         venv = committed_venv(Path(root))
         if venv:
-            py = os.path.join(str(venv), "bin", "python")
-            if os.path.exists(py):
+            py = _venv_python(str(venv))
+            if py:
                 return py
     except Exception:       # an older Hermes has no pm module; fall through to the legacy venvs
         pass
@@ -1022,7 +1022,17 @@ def hermes_python(root=None):
         if added and root in sys.path:
             sys.path.remove(root)
     for d in ("venv", ".venv"):
-        py = os.path.join(root, d, "bin", "python")
+        py = _venv_python(os.path.join(root, d))
+        if py:
+            return py
+    return ""
+
+
+def _venv_python(venv_dir):
+    """The interpreter inside a venv: POSIX lays it at bin/python, Windows at Scripts/python.exe."""
+    for rel in (os.path.join("bin", "python"), os.path.join("Scripts", "python.exe"),
+                os.path.join("Scripts", "python")):
+        py = os.path.join(venv_dir, rel)
         if os.path.exists(py):
             return py
     return ""

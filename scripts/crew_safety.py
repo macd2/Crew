@@ -51,6 +51,12 @@ def _hermes():
     for src in HERMES_SRC:
         if src and os.path.isdir(src) and src not in sys.path:
             sys.path.append(src)
+    # the Windows Desktop layout keeps the source tree under HERMES_HOME, not under a ~/.hermes home
+    home = (os.environ.get("HERMES_HOME") or "").strip()
+    if home:
+        win_src = os.path.join(os.path.abspath(os.path.expanduser(home)), "hermes-agent")
+        if os.path.isdir(win_src) and win_src not in sys.path:
+            sys.path.append(win_src)
     _venv_deps()
     import tools.approval_detection  # noqa: F401
 
@@ -69,7 +75,9 @@ def _venv_deps():
     if not py:
         return
     pattern = os.path.join(os.path.dirname(os.path.dirname(py)), "lib", "python*", "site-packages")
-    for site in sorted(glob.glob(pattern)):
+    # a Windows venv keeps its packages at Lib\site-packages, not under a versioned lib/pythonX.Y dir
+    wpattern = os.path.join(os.path.dirname(os.path.dirname(py)), "Lib", "site-packages")
+    for site in sorted(glob.glob(pattern)) + ([wpattern] if os.path.isdir(wpattern) else []):
         if site not in sys.path:
             sys.path.append(site)
 
