@@ -22,6 +22,61 @@
   // The pages the tab may show: the board (optionally ?all=1) and one card's graph.
   var PAGE_RE = /^(board|card\/[A-Za-z0-9_-]+)(\?all=1)?$/;
 
+  // A card page's discussion chip posts { type: "hermes:open-session", sessionId, profile } (card.js
+  // openDiscussion). Only plain identifiers pass: anything with a slash, a dot or a shell character is dropped
+  // before it can shape a URL (same rule as card.js parseSessionCoord).
+  var SESSION_IDENT_RE = /^[A-Za-z0-9_-]+$/;
+
+  function parseOpenSession(data) {
+    if (!data || typeof data !== "object" || data.type !== "hermes:open-session") return null;
+    var sid = String(data.sessionId == null ? "" : data.sessionId).trim();
+    var prof = String(data.profile == null ? "" : data.profile).trim();
+    if (!sid || sid.length > 128 || sid === "no-session" || !SESSION_IDENT_RE.test(sid)) return null;
+    if (prof && (prof.length > 64 || !SESSION_IDENT_RE.test(prof))) return null;
+    return { sessionId: sid, profile: prof };
+  }
+
+  // The origins a card frame may post hermes:open-session from: the dashboard's own, or - when the dashboard
+  // itself is served on loopback - any loopback origin (127.0.0.1 / localhost / [::1], any port), so a card page
+  // served by the crew daemon (:8799) or reached as localhost while the dashboard is 127.0.0.1:9119 still opens
+  // its session. A remote origin never qualifies, and the payload is re-validated by parseOpenSession anyway.
+  var LOOPBACK_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?$/i;
+
+  function isSessionOriginAllowed(origin, own) {
+    origin = String(origin || "");
+    own = String(own || "");
+    if (!origin || origin === "null") return false;
+    if (origin === own) return true;
+    return LOOPBACK_ORIGIN_RE.test(origin) && LOOPBACK_ORIGIN_RE.test(own);
+  }
+
+  // The dashboard's chat route for a session, under the base path the server injected when reverse-proxied.
+  function chatResumePath(target, basePath) {
+    var base = String(basePath || "");
+    if (base && base.charAt(0) !== "/") base = "/" + base;
+    base = base.replace(/\/+$/, "");
+    var q = "resume=" + encodeURIComponent(target.sessionId);
+    if (target.profile) q += "&profile=" + encodeURIComponent(target.profile);
+    return base + "/chat?" + q;
+  }
+
+  // Navigate the dashboard (this window, the iframe's parent) to /chat?resume=<sid>&profile=<prof>. The SPA's
+  // router follows history: push the entry the way the router does, then tell it with popstate, so the chat
+  // page (kept mounted) resumes the session without a reload. A window without history gets a plain load.
+  function openChatSession(target, win) {
+    if (!target || !win) return false;
+    var path = chatResumePath(target, win.__HERMES_BASE_PATH__);
+    try {
+      var hist = win.history, prev = hist && hist.state;
+      var idx = prev && typeof prev.idx === "number" ? prev.idx + 1 : 0;
+      hist.pushState({ usr: null, key: Math.random().toString(36).slice(2, 10), idx: idx }, "", path);
+      win.dispatchEvent(new win.PopStateEvent("popstate", { state: hist.state }));
+    } catch (e) {
+      win.location.assign(path);
+    }
+    return true;
+  }
+
   function themeQuery() {
     var style = window.getComputedStyle(document.documentElement);
     var rawBg = style.getPropertyValue("--background-base").trim() || style.getPropertyValue("--background").trim() || "";
@@ -77,12 +132,20 @@
       loadPage();
     }, [loadPage]);
 
-    // Board/card links clicked inside the srcdoc page arrive here (see the bridge in plugin_api.py).
+    // Board/card links clicked inside the srcdoc page arrive here (see the bridge in plugin_api.py), and so
+    // does a card's discussion chip (hermes:open-session), which opens that session in the dashboard's chat.
     React.useEffect(function () {
       function onMessage(e) {
         var frame = iframeRef.current;
-        if (!frame || e.source !== frame.contentWindow || e.origin !== window.location.origin) return;
+        if (!frame || e.source !== frame.contentWindow) return;
         var d = e.data;
+        if (d && d.type === "hermes:open-session") {
+          if (!isSessionOriginAllowed(e.origin, window.location.origin)) return;
+          var target = parseOpenSession(d);
+          if (target) openChatSession(target, window);
+          return;
+        }
+        if (e.origin !== window.location.origin) return;
         if (!d || d.type !== "crew:navigate" || typeof d.path !== "string" || !PAGE_RE.test(d.path)) return;
         setPage(d.path);
       }

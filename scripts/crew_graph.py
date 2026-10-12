@@ -317,6 +317,82 @@ def find_session_by_id(session_id):
     return None, None, None
 
 
+ORIGIN_WINDOW_S = 900       # the creating turn names the new card id within seconds; 15 min is generous
+ORIGIN_MISS_TTL_S = 120     # a card nobody names yet is looked up again after this, not on every refresh
+_ORIGIN_CACHE = {}
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _origin_from_events(board_db, card_id):
+    """The session crew_card recorded when it opened the card (task_events kind='origin'), or None."""
+    rows = q(board_db, "select payload from task_events where task_id = ? and kind = 'origin' "
+                       "order by id limit 1", (card_id,))
+    for (payload,) in rows:
+        try:
+            data = json.loads(payload or "{}")
+        except Exception:
+            continue
+        sid = str(data.get("session") or "").strip()
+        if sid and sid != "no-session" and _SESSION_ID_RE.match(sid):
+            prof = find_session_by_id(sid)[0] or str(data.get("by") or "").strip()
+            return prof if _SESSION_ID_RE.match(prof or "") else "", sid
+    return None
+
+
+def _origin_from_messages(card_id, created_at, run_sessions):
+    """The discussion that created the card, read from the sessions themselves: the earliest message in any
+    profile's state.db that names the card id, within ORIGIN_WINDOW_S of its creation. The creator sees the
+    new id first (the create call's own result), so the earliest mention is the creator; the card's own worker
+    sessions (run_sessions) are excluded so a card is never linked to itself."""
+    if not card_id or not created_at:
+        return None
+    lo, hi = float(created_at) - 5, float(created_at) + ORIGIN_WINDOW_S
+    like = "%" + str(card_id) + "%"
+    best = None
+    for prof, db in discover_state_dbs():
+        rows = q(db, "select session_id, timestamp from messages where timestamp between ? and ? "
+                     "and (content like ? or tool_calls like ?) order by timestamp limit 8",
+                 (lo, hi, like, like))
+        for sid, ts in rows:
+            if not sid or sid in run_sessions or not _SESSION_ID_RE.match(str(sid)):
+                continue
+            if best is None or (ts or 0) < best[0]:
+                best = (ts or 0, prof, str(sid))
+            break
+    return (best[1], best[2]) if best else None
+
+
+def find_origin_session(board_db, card_id, card_session_id=None, created_at=None):
+    """The discussion a card came from, as (profile, session_id), or ("", "") when none can be shown.
+
+    In order: the card row's tasks.session_id (kanban_create from a chat, a plan child inheriting it), the
+    origin crew_card stamped when it opened the card, then the state.db sessions that named the card right
+    after it was created (a `hermes kanban create` from a terminal stamps neither). Found answers are cached
+    for the process; a miss is retried after ORIGIN_MISS_TTL_S.
+    """
+    sid = str(card_session_id or "").strip()
+    if sid and sid != "no-session" and _SESSION_ID_RE.match(sid):
+        return find_session_by_id(sid)[0] or "", sid
+    if not card_id:
+        return "", ""
+    hit = _ORIGIN_CACHE.get(card_id)
+    if hit and (hit[2] or time.time() - hit[3] < ORIGIN_MISS_TTL_S):
+        return hit[0], hit[1]
+    found = _origin_from_events(board_db, card_id)
+    if not found:
+        run_sessions = set()
+        for (payload,) in q(board_db, "select payload from task_events where task_id = ? and kind = 'session'",
+                            (card_id,)):
+            try:
+                run_sessions.add(str(json.loads(payload or "{}").get("session") or ""))
+            except Exception:
+                pass
+        found = _origin_from_messages(card_id, created_at, run_sessions)
+    prof, osid = found or ("", "")
+    _ORIGIN_CACHE[card_id] = (prof, osid, bool(osid), time.time())
+    return prof, osid
+
+
 def exact_session_for_run(board_db, card_id, run_id):
     """The session a run used, from the worker's own record - not a guess.
 
@@ -921,6 +997,18 @@ def load_first_pass(card_id):
     return crew_card.first_pass(card_id)
 
 
+def hermes_chat_url():
+    """The Hermes web dashboard's base URL, for a standalone card page's discussion chip to open
+    <base>/chat?resume=<sid>: CREW_HERMES_DASHBOARD_URL, else the default profile's dashboard.public_url, else
+    the dashboard's loopback default. Only an http(s) URL with no quote, space or angle bracket is returned."""
+    for raw in ((os.environ.get("CREW_HERMES_DASHBOARD_URL") or "").strip(),
+                (crew_card.config_value("public_url", section="dashboard", home=base_home()) or "").strip(),
+                "http://127.0.0.1:9119"):
+        if re.match(r"^https?://[^\s\"'<>]+$", raw or ""):
+            return raw.rstrip("/")
+    return ""
+
+
 def card_box_fields(card_ev):
     """The card's own fields for the card page. Hand it the CARD node's evidence.
 
@@ -940,6 +1028,10 @@ def card_box_fields(card_ev):
         "card_created_at": card_ev.get("created_at"),
         "card_run_count": card_ev.get("run_count") or 0,
         "coordinator": card_ev.get("coordinator") or "",
+        # the card's discussion session: tasks.session_id, else the one find_origin_session discovered (crew's
+        # origin record, or the state.db session that named the card at creation), with the profile it lives in
+        "session_id": card_ev.get("session_id") or "",
+        "session_profile": card_ev.get("session_profile") or "",
         "budget": {"spent": card_ev.get("spent") or 0, "ceiling": card_ev.get("ceiling") or 0},
     }
 
@@ -1473,12 +1565,17 @@ class _Builder(object):
         self.runs = runs
         writer_role = card_role(body, skills)
         cstatus = card_status(tstatus, [run_status(r[2], r[3]) for r in runs])
+        # the discussion the card came from: the row's session_id, else crew's origin record, else the state.db
+        # session that named the card as it was created (a CLI-created card carries neither)
+        origin_profile, origin_sid = find_origin_session(self.db, cid, card_session_id, created_at)
         card_ev = {
             "assignee": assignee, "result": result, "model_override": model_override,
             "provider_override": provider_override,
             "status": tstatus, "block_kind": block_kind, "created_at": created_at,
             "run_count": len(runs), "writer_role": writer_role,
             "coordinator": body_field(body, "Coordinator"),
+            "session_id": card_session_id or origin_sid or "",
+            "session_profile": origin_profile or "",
             "verifier": body_field(body, "Verifier"),
             "done_when": body_field(body, "Done when"),
             "spent": load_ledger(cid)[0], "ceiling": load_ledger(cid)[1],
@@ -1715,6 +1812,7 @@ def build_graph(card_ref, steps_n=DEFAULT_STEPS):
         "card_status": card_row[2] if len(card_row) > 2 else "",
         # Read off the CARD node, never off the root: with a brief recorded the root is the brief.
         **card_box_fields(root_ev),
+        "hermes_chat_url": hermes_chat_url(),
         "tokens": load_ledger_totals(card_id),
         "situation": build_situation(b.db, card_id, card_row, root_ev, b.runs),
         "report": load_done_report(b.db, card_id, card_row[2] if len(card_row) > 2 else ""),

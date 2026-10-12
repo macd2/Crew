@@ -484,6 +484,121 @@ class SplitPlanTests(CardTestCase):
         self.assertNotIn("kanban_request_review", closeout)
 
 
+class SessionProvenanceTests(CardTestCase):
+    """A card names the discussion it came from, and a plan's children keep the plan's discussion: the card page
+    links back to it (kanban-session-traceability). Cards are recorded, not created (create_card is replaced)."""
+
+    CHILD = SplitPlanTests.CHILD
+    PROOF = "sh -c 'exit 0'"
+    OWNER = "default/20261012_092737_07d8d5"
+
+    def setUp(self):
+        super().setUp()
+        self.made, self.stamped = [], []
+
+        def create(title, body, assignee, skills=(), parents=(), **kw):
+            cid = "t_%d" % (len(self.made) + 1)
+            self.made.append({"id": cid, "title": title, "body": body, "parents": list(parents)})
+            return {"id": cid, "assignee": assignee}
+
+        for p in (mock.patch.object(crew_card, "create_card", create),
+                  mock.patch.object(crew_card, "finish_card", lambda *a, **k: {}),
+                  mock.patch.object(crew_card, "_append_card_event", lambda *a, **k: True),
+                  mock.patch.object(crew_card, "stamp_session",
+                                    lambda cid, sid, db=None: self.stamped.append((cid, sid)) or bool(sid)),
+                  mock.patch.object(crew_card, "_kanban", lambda *a, **k: mock.Mock(returncode=0, stdout="", stderr=""))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_session_of_reads_the_session_a_coordinator_line_names(self):
+        self.assertEqual("20261012_092737_07d8d5", crew_card.session_of(self.OWNER))
+        self.assertEqual("s-1", crew_card.session_of(" owner-chat/s-1 "))
+
+    def test_session_of_is_empty_for_a_card_with_no_real_session(self):
+        for value in (None, "", "default", "default/", "default/no-session", "a/b/c", "x/../etc", "x/a b",
+                      "x/$(rm -rf)", "x/a;b"):
+            with self.subTest(value=value):
+                self.assertEqual("", crew_card.session_of(value))
+
+    def test_children_inherit_the_plans_discussion_not_the_workers_session(self):
+        os.environ["HERMES_SESSION_ID"] = "worker_transient_session"
+        res = crew_card.run_plan({"title": "t", "goal": "g", "coordinator": self.OWNER,
+                                  "children": [dict(self.CHILD, proof_cmd=self.PROOF),
+                                               dict(self.CHILD, artifact="b.md", proof_cmd=self.PROOF)]})
+        for child in res["children"]:
+            body = next(m["body"] for m in self.made if m["id"] == child["id"])
+            self.assertEqual(self.OWNER, crew_card.field(body, "Coordinator"))
+            self.assertNotIn("worker_transient_session", body)
+        # parent, both children and the close-out all carry the owner's discussion on their row
+        self.assertEqual(sorted(m["id"] for m in self.made), sorted(cid for cid, _ in self.stamped))
+        self.assertEqual({"20261012_092737_07d8d5"}, {sid for _, sid in self.stamped})
+
+    def test_a_split_keeps_the_split_cards_discussion_from_its_children(self):
+        # the coordinator's apply_split hands each child the split card's Coordinator: and no plan-level one
+        res = crew_card.run_plan({"title": "t", "goal": "g",
+                                  "children": [dict(self.CHILD, coordinator=self.OWNER)]}, closeout_proof=self.PROOF)
+        child = next(m for m in self.made if m["id"] == res["children"][0]["id"])
+        self.assertEqual(self.OWNER, crew_card.field(child["body"], "Coordinator"))
+        self.assertIn((res["closeout"]["id"], "20261012_092737_07d8d5"), self.stamped)
+        self.assertIn((res["parent"]["id"], "20261012_092737_07d8d5"), self.stamped)
+
+    def test_a_childs_own_coordinator_is_not_overwritten(self):
+        mine = "leader/other_session"
+        crew_card.run_plan({"title": "t", "goal": "g", "coordinator": self.OWNER,
+                            "children": [dict(self.CHILD, coordinator=mine, proof_cmd=self.PROOF)]})
+        child = self.made[1]
+        self.assertEqual(mine, crew_card.field(child["body"], "Coordinator"))
+        self.assertIn((child["id"], "other_session"), self.stamped)
+
+    def test_a_plan_with_no_session_anywhere_stamps_nothing_real(self):
+        os.environ.pop("HERMES_SESSION_ID", None)
+        os.environ.pop("HERMES_SESSION_KEY", None)
+        crew_card.run_plan({"title": "t", "goal": "g", "children": [dict(self.CHILD, proof_cmd=self.PROOF)]})
+        self.assertTrue(crew_card.field(self.made[1]["body"], "Coordinator").endswith("/no-session"))
+        self.assertEqual({""}, {sid for _, sid in self.stamped})      # legacy shape: no session, no link
+
+    def test_open_card_writes_one_coordinator_on_the_body_and_the_row(self):
+        os.environ["HERMES_SESSION_ID"] = "20261012_111111_abcdef"
+        res = crew_card.open_card(dict(self.CHILD, proof_cmd=self.PROOF))
+        body = self.made[0]["body"]
+        self.assertEqual("20261012_111111_abcdef", crew_card.session_of(crew_card.field(body, "Coordinator")))
+        self.assertEqual([("t_1", "20261012_111111_abcdef")], self.stamped)
+        self.assertEqual("20261012_111111_abcdef", res["session_id"])
+
+
+class StampSessionKernelTests(CardTestCase):
+    """stamp_session on a board made by Hermes's own code: it fills an empty tasks.session_id and never
+    overwrites one the kernel already set (kanban_create's own, or the one inherited from the creating task)."""
+
+    def setUp(self):
+        super().setUp()
+        self.kb, self.conn, self.path = K.open_board(self.home)
+        self.addCleanup(self.conn.close)
+
+    def session(self, cid):
+        return self.kb.get_task(self.conn, cid).session_id
+
+    def test_an_empty_row_gets_the_discussion(self):
+        cid = K.add_card(self.conn)
+        self.assertIsNone(self.session(cid))
+        self.assertTrue(crew_card.stamp_session(cid, "20261012_092737_07d8d5", db=self.path))
+        self.assertEqual("20261012_092737_07d8d5", self.session(cid))
+
+    def test_an_existing_session_is_never_overwritten(self):
+        cid = self.kb.create_task(self.conn, title="t", body=K.BODY, assignee="crew-worker", session_id="kept")
+        self.assertFalse(crew_card.stamp_session(cid, "other", db=self.path))
+        self.assertEqual("kept", self.session(cid))
+
+    def test_nothing_to_stamp_or_no_board_is_a_no_op(self):
+        cid = K.add_card(self.conn)
+        self.assertFalse(crew_card.stamp_session(cid, "", db=self.path))
+        self.assertFalse(crew_card.stamp_session("", "s", db=self.path))
+        missing = os.path.join(self.home, "no-such-board", "kanban.db")
+        self.assertFalse(crew_card.stamp_session(cid, "s", db=missing))
+        self.assertFalse(os.path.exists(missing))            # sqlite never created an empty board
+        self.assertIsNone(self.session(cid))
+
+
 class SendToVerifierTests(CardTestCase):
     """send_to_verifier on the kernel's real states: the stopped card is lifted and put in review in one step, so a
     dispatcher claim in between cannot make the review fail."""

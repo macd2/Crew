@@ -102,6 +102,8 @@ class CardBoxFieldsTests(unittest.TestCase):
         self.assertEqual(2, f["card_run_count"])
         self.assertEqual("owner-chat/20260929_174148_86c00e", f["coordinator"])
         self.assertEqual({"spent": 144000, "ceiling": 1500000}, f["budget"])
+        self.assertEqual("", f["session_id"])                    # no row session: the card page reads the line
+        self.assertEqual("20260929_174148_86c00e", cg.card_box_fields(dict(self.CARD, session_id="20260929_174148_86c00e"))["session_id"])
 
     def test_the_roles_coordinator_and_budget_name_the_card_not_a_brief(self):
         # The brief node became the graph's root while the card carries these facts. Handed the brief

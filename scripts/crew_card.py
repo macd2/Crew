@@ -559,6 +559,57 @@ def coordinator_id(session=None):
     return "%s/%s" % (current_profile(), sid or "no-session")
 
 
+SESSION_ID_RX = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def session_of(coordinator):
+    """The discussion session id a `Coordinator:` value names (`<profile>/<session id>`), or "".
+
+    `no-session` (a card opened outside any session) and anything that is not a plain id read as none, so a
+    card without a session is never linked to one. The card page (card.js parseSessionCoord) applies the same rule."""
+    _, sep, sid = str(coordinator or "").strip().partition("/")
+    sid = sid.strip()
+    if not sep or sid == "no-session" or not SESSION_ID_RX.match(sid):
+        return ""
+    return sid
+
+
+def plan_coordinator(spec, children=()):
+    """The discussion a plan belongs to: the spec's own `coordinator`, else the first child's, else this process.
+
+    A plan run inside a worker (the coordinator splitting a card) must keep the owner's discussion session, not
+    take the worker's transient one from the environment, so an inherited value always wins over
+    coordinator_id()."""
+    for value in [(spec or {}).get("coordinator")] + [ch.get("coordinator") for ch in children]:
+        value = str(value or "").strip()
+        if value:
+            return value
+    return coordinator_id()
+
+
+def stamp_session(card_id, session, db=None):
+    """Record the discussion session on the card's row (`tasks.session_id`), only where the row has none.
+
+    `hermes kanban create` has no session flag, so a card the crew opens from the CLI would otherwise carry
+    NULL and the board could not link it back to the discussion. The kernel's own rule is kept: an existing
+    value (set by kanban_create or inherited from the creating task) is never overwritten."""
+    if not card_id or not session:
+        return False
+    db = db or kanban_db()
+    if not db or not os.path.isfile(db):        # never let sqlite create an empty board file
+        return False
+    conn = sqlite3.connect(db, timeout=10)
+    try:
+        cur = conn.execute("update tasks set session_id = ? where id = ? and (session_id is null or session_id = '')",
+                           (session, card_id))
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def origin_id(value):
     """The chat that opened the card, `<platform>:<chat id>` (Zulip: `zulip:stream:<s>|<topic>`),
     kept verbatim. Only an explicit --origin sets it: a card opened by a worker, the CLI or a probe
@@ -1372,6 +1423,8 @@ def finish_card(card_id, c, assignee, env=None, pick=None, pinned=False):
 
 def open_card(c, dry_run=False, allow_no_proof=False, parents=(), initial_status=None):
     c = prepare_contract(c, allow_no_proof)
+    # one value for the body's Coordinator: line and the row's session_id, resolved before either is written
+    c["coordinator"] = str(c.get("coordinator") or "").strip() or coordinator_id()
     assignee = c.get("assignee") or role_profile(c["role"])
     skills = card_skills(assignee, c["role"])
     title = c.get("title") or c["goal"]
@@ -1384,6 +1437,9 @@ def open_card(c, dry_run=False, allow_no_proof=False, parents=(), initial_status
         if done.get("units"):
             print("units file: %s (%d unit(s))" % (done["progress_file"], len(done["units"])))
         res.update(done)
+        # the card's row names the discussion it came from, so the board can link back to it
+        if stamp_session(card_id, session_of(c["coordinator"])):
+            res["session_id"] = session_of(c["coordinator"])
     res.update({"role": c["role"], "budget": c["budget"], "proof_cmd": c.get("proof_cmd")})
     if c.get("budget_note"):
         res["budget_note"] = c["budget_note"]
@@ -1414,12 +1470,21 @@ def run_plan(spec, dry_run=False, closeout_proof=None):
         if gaps:
             raise ValueError("child %d contract incomplete, missing: %s" % (i, ", ".join(gaps)))
     coord = role_profile("coordinator")
+    # every card of the plan belongs to the one discussion that asked for it: a child without its own coordinator
+    # inherits the plan's, never the session of whichever worker happens to run the plan
+    discussion = plan_coordinator(spec, children)
+    for ch in children:
+        if not str(ch.get("coordinator") or "").strip():
+            ch["coordinator"] = discussion
+    session = session_of(discussion)
     goal = spec.get("goal") or spec.get("title") or "crew plan"
     pbody = ("Role: coordinator\nCoordinator: %s\n\nGOAL: %s\n\nDone when: %s\n\n"
              "Parent contract card. Children run in parallel, one writer each, each verified by %s.\n"
              % (current_profile(), goal, spec.get("done_when") or "every child card is done with a PASS verdict",
                 profile_prefix() + "verifier"))
     parent = create_card(spec.get("title") or goal, pbody, coord, initial_status="blocked", dry_run=dry_run)
+    if not dry_run:
+        stamp_session(parent.get("id"), session)
     made = []
     for ch in children:
         made.append(open_card(ch, dry_run=dry_run, parents=[parent.get("id") or "PARENT"],
@@ -1445,6 +1510,7 @@ def run_plan(spec, dry_run=False, closeout_proof=None):
     closeout = create_card("close-out: " + (spec.get("title") or goal), cbody, coord,
                            parents=close_parents, dry_run=dry_run)
     if closeout.get("id") and not dry_run:
+        stamp_session(closeout["id"], session)
         # code-authored (crew's closeout check, plus for a split the split card's owner-confirmed proof), so it is
         # its own snapshot; no origin or session in it, so the card still inherits its chat
         _append_card_event(closeout["id"], "proof_confirm", {"proof_cmd": cproof, "by": "crew",

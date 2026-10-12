@@ -204,6 +204,15 @@ body.page-card{display:flex;flex-direction:column;background:var(--crew-bg);colo
   font:inherit;font-size:10px;line-height:14px;padding:0 0 0 5px;cursor:pointer;}
 .page-card #sitfields .copy:hover{color:var(--crew-text-1);}
 .page-card #sitfields .copy:focus-visible{outline:2px solid var(--crew-tone-ready);outline-offset:1px;}
+/* the discussion chip: the card's way back to the chat it came from (a host frame opens it, a browser opens the chat or copies it) */
+.page-card #sitfields .fp.discussion{border-color:color-mix(in srgb, var(--crew-tone-running) 40%, transparent);}
+.page-card #sitfields .copy.jump{color:var(--crew-tone-running);}
+.page-card #sitfields .copy.jump:hover{color:var(--crew-text-1);}
+.crew-toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,8px);opacity:0;pointer-events:none;z-index:50;
+  max-width:min(560px,90vw);padding:6px 12px;border-radius:6px;font-size:11.5px;line-height:16px;
+  background:var(--crew-elevated);color:var(--crew-text-1);border:1px solid var(--crew-stroke-1);box-shadow:var(--crew-shadow);
+  transition:opacity .18s ease,transform .18s ease;}
+.crew-toast.on{opacity:1;transform:translate(-50%,0);}
 /* the pending reason and the repeated-stop note: callouts in their tone */
 .page-card #sitbox,.page-card #spinbox{--tone:var(--crew-tone-blocked);margin:0;border:1px solid color-mix(in srgb, var(--tone) 22%, transparent);
   border-left:2px solid var(--tone);border-radius:6px;background:color-mix(in srgb, var(--tone) 7%, transparent);
