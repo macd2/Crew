@@ -49,7 +49,7 @@ eq(page.data, { path: '/crew' })
 eq([nav.data.path, nav.data.label], ['/crew', 'Crew'])
 ok(pane, 'pane is registered under PANES_AREA')
 eq(pane.id, 'crew-flow-graph-pane')
-eq(pane.data, { placement: 'right', width: '380px', hideOnly: true })
+eq(pane.data, { placement: 'right', width: '380px' })
 
 // --- allowlist: the real paths the pages use are accepted and mapped, everything else is refused
 const R = mod.routeFor

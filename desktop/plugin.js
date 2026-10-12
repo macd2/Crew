@@ -202,7 +202,8 @@ export default {
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: '/crew' }, render: () => jsx(CrewPage, { ctx }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/crew', label: 'Crew', codicon: 'organization' } },
-      { id: 'crew-flow-graph-pane', area: PANES_AREA, title: 'Crew Flow Graph', data: { placement: 'right', width: '380px', hideOnly: true }, render: () => jsx(CrewFlowGraphPane, { ctx }) }
+      { id: 'crew-flow-graph-pane', area: PANES_AREA, title: 'Crew Flow Graph', data: { placement: 'right', width: '380px' }, render: () => jsx(CrewFlowGraphPane, { ctx }) },
+      { id: 'crew-pane-companion', area: PANES_AREA, title: 'Crew Companion', data: { placement: 'floating' }, render: () => null }
     ])
   }
 }
