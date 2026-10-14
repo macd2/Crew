@@ -7,7 +7,7 @@
 // postMessage({crew: 1, id, method, path, body}); handleFrameMessage checks who sent it and what it asks for,
 // calls ctx.rest, and answers the same way.
 
-import { ROUTES_AREA, SIDEBAR_NAV_AREA, Button, SandboxedFrame } from '@hermes/plugin-sdk'
+import { ROUTES_AREA, SIDEBAR_NAV_AREA, PANES_AREA, Button, SandboxedFrame } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
@@ -118,13 +118,92 @@ function CrewPage({ ctx }) {
   })
 }
 
+function CrewFlowGraphPane({ ctx }) {
+  const [cardId, setCardId] = useState(null)
+  const [cards, setCards] = useState([])
+  const [src, setSrc] = useState(null)
+  const [error, setError] = useState(null)
+  const frameRef = useRef(null)
+
+  useEffect(() => {
+    let live = true
+    const poll = () => {
+      ctx.rest('/board.json')
+        .then(b => {
+          if (!live || !b) return
+          const list = Array.isArray(b.cards) ? b.cards : []
+          setCards(list)
+          setCardId(prev => {
+            if (prev && list.some(c => c.id === prev)) return prev
+            const running = list.find(c => c.status === 'running')
+            return running ? running.id : (list[0] ? list[0].id : null)
+          })
+        })
+        .catch(() => {})
+    }
+    poll()
+    const timer = setInterval(poll, 5000)
+    return () => { live = false; clearInterval(timer) }
+  }, [])
+
+  useEffect(() => {
+    if (!cardId) {
+      setSrc(null)
+      return
+    }
+    let live = true
+    setSrc(null)
+    setError(null)
+    ctx.rest('/embed/card/' + cardId)
+      .then(env => { if (live) setSrc(toDataUrl(env.html)) })
+      .catch(e => { if (live) setError(String((e && e.message) || e)) })
+    return () => { live = false }
+  }, [cardId])
+
+  useEffect(() => ctx.addEventListener(window, 'message', event =>
+    handleFrameMessage(ctx, frameRef.current && frameRef.current.contentWindow, event, target => {
+      if (target && target.page === 'card' && target.id) setCardId(target.id)
+    })), [])
+
+  return jsxs('div', {
+    className: 'flex h-full min-h-0 w-full flex-col',
+    children: [
+      cards.length > 1
+        ? jsx('div', {
+            className: 'flex shrink-0 items-center justify-between border-b border-(--ui-border-subtle) px-3 py-1 text-xs',
+            children: jsxs('div', {
+              className: 'flex items-center gap-1.5 overflow-x-auto',
+              children: [
+                jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'Card:' }),
+                cards.map(c => jsx(Button, {
+                  key: c.id,
+                  size: 'sm',
+                  variant: c.id === cardId ? 'secondary' : 'ghost',
+                  onClick: () => setCardId(c.id),
+                  children: c.id
+                }))
+              ]
+            })
+          })
+        : null,
+      error
+        ? jsx('div', { className: 'p-4 text-sm text-(--ui-text-tertiary)', children: 'Flow graph could not load: ' + error })
+        : src
+          ? jsx(SandboxedFrame, { ref: frameRef, src, title: 'Crew Flow Graph', className: 'h-full min-h-0 w-full flex-1 border-0' })
+          : jsx('div', { className: 'p-4 text-sm text-(--ui-text-tertiary)', children: 'No active cards on board.' })
+    ]
+  })
+}
+
 export default {
   id: 'crew',
   name: 'Crew',
   register(ctx) {
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: '/crew' }, render: () => jsx(CrewPage, { ctx }) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/crew', label: 'Crew', codicon: 'organization' } }
+      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/crew', label: 'Crew', codicon: 'organization' } },
+      { id: 'crew-flow-graph-pane', area: PANES_AREA, title: 'Crew Flow Graph', data: { placement: 'right', width: '380px' }, render: () => jsx(CrewFlowGraphPane, { ctx }) },
+      { id: 'crew-pane-companion', area: PANES_AREA, title: 'Crew Companion', data: { placement: 'floating' }, render: () => null }
     ])
   }
 }

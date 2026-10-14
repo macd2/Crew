@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 
 const [, , pluginPath, tmp] = process.argv
 fs.writeFileSync(path.join(tmp, 'sdk.mjs'), `
-export const ROUTES_AREA = 'routes', SIDEBAR_NAV_AREA = 'sidebar.nav'
+export const ROUTES_AREA = 'routes', SIDEBAR_NAV_AREA = 'sidebar.nav', PANES_AREA = 'panes'
 export const Button = 'Button', SandboxedFrame = 'SandboxedFrame'
 `)
 fs.writeFileSync(path.join(tmp, 'jsx.mjs'), `
@@ -44,9 +44,12 @@ const ctx = {
 }
 eq([plugin.id, typeof plugin.register], ['crew', 'function'])
 plugin.register(ctx)
-const page = calls.find(c => c.area === 'routes'), nav = calls.find(c => c.area === 'sidebar.nav')
+const page = calls.find(c => c.area === 'routes'), nav = calls.find(c => c.area === 'sidebar.nav'), pane = calls.find(c => c.area === 'panes')
 eq(page.data, { path: '/crew' })
 eq([nav.data.path, nav.data.label], ['/crew', 'Crew'])
+ok(pane, 'pane is registered under PANES_AREA')
+eq(pane.id, 'crew-flow-graph-pane')
+eq(pane.data, { placement: 'right', width: '380px' })
 
 // --- allowlist: the real paths the pages use are accepted and mapped, everything else is refused
 const R = mod.routeFor
@@ -137,4 +140,23 @@ eq(out.props.children[0].props.children.props.children, 'Back to board')
 globalThis.__hooks.effects[0]()
 await new Promise(r => setTimeout(r, 5))
 eq(rests.at(-1)[0], '/embed/card/t_77')
+
+// --- the pane: renders CrewFlowGraphPane with SandboxedFrame
+globalThis.__hooks = { n: 0, state: {}, sets: [], effects: [] }
+let paneTree = pane.render()
+const renderPane = () => { globalThis.__hooks.n = 0; globalThis.__hooks.effects = []; return paneTree.type(paneTree.props) }
+let paneOut = renderPane()
+ok(paneOut, 'CrewFlowGraphPane renders properly')
+eq(paneOut.props.children[1].props.children, 'No active cards on board.')
+
+globalThis.__hooks.state[0] = 't_77'
+paneOut = renderPane()
+globalThis.__hooks.effects[1]()
+await new Promise(r => setTimeout(r, 5))
+eq(rests.at(-1)[0], '/embed/card/t_77')
+paneOut = renderPane()
+const paneFrame = paneOut.props.children[1]
+eq(paneFrame.type, 'SandboxedFrame')
+eq(paneFrame.props.title, 'Crew Flow Graph')
+
 console.log(`OK ${checks} checks`)
