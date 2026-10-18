@@ -16,6 +16,12 @@ description: >
   independent verifier that runs the proof itself, a per-card token budget as a hard stop, and a local
   dashboard of every card, run and step. /crew-status, /crew-graph and /crew-stop are plain commands with
   no model call; /crew-diagnose explains every stuck card.
+provides_tools:
+  - crew_card_create
+  - crew_diagnose
+  - crew_verdict
+  - crew_status
+  - crew_event_subscribe
 provides_hooks:
   - pre_tool_call
   - post_tool_call

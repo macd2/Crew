@@ -1678,6 +1678,16 @@ def register(ctx):
             args_hint=hint,
         )
 
+    # First-class native tools registered via ctx.register_tool()
+    try:
+        try:
+            from .native_tools import register_native_tools
+        except ImportError:
+            from native_tools import register_native_tools
+        register_native_tools(ctx)
+    except Exception:
+        pass
+
 
 
     # `/crew` is the intake SKILL, never a plugin command: dispatch tries plugin commands before
