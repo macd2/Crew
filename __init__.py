@@ -1594,6 +1594,41 @@ def crew_open_hook(tool_name=None, args=None, result=None, **kwargs):
                                      str((args or {}).get("title") or "").strip())
             except Exception:  # noqa: BLE001 - bookkeeping never fails the intake turn
                 pass
+        if card_id:
+            try:
+                try:
+                    from .runtime_events import emit_card_event, CARD_CREATED
+                except ImportError:
+                    from runtime_events import emit_card_event, CARD_CREATED
+                emit_card_event(
+                    CARD_CREATED,
+                    card_id=card_id,
+                    status=str((args or {}).get("initial_status") or "running"),
+                    title=str((args or {}).get("title") or "").strip(),
+                    assignee=str((args or {}).get("assignee") or "").strip(),
+                )
+            except Exception:
+                pass
+        return None
+
+    if tool_name in ("kanban_complete", "kanban_block", "kanban_request_review", "kanban_request_changes"):
+        task_id = (args or {}).get("task_id") or os.environ.get("HERMES_KANBAN_TASK")
+        if task_id:
+            try:
+                try:
+                    from .runtime_events import emit_card_event, CARD_COMPLETED, CARD_BLOCKED, CARD_REVIEW, CARD_UPDATED
+                except ImportError:
+                    from runtime_events import emit_card_event, CARD_COMPLETED, CARD_BLOCKED, CARD_REVIEW, CARD_UPDATED
+                if tool_name == "kanban_complete":
+                    emit_card_event(CARD_COMPLETED, card_id=task_id, status="done", summary=(args or {}).get("summary"))
+                elif tool_name == "kanban_block":
+                    emit_card_event(CARD_BLOCKED, card_id=task_id, status="blocked", reason=(args or {}).get("reason"), block_kind=(args or {}).get("kind"))
+                elif tool_name == "kanban_request_review":
+                    emit_card_event(CARD_REVIEW, card_id=task_id, status="review", summary=(args or {}).get("summary"))
+                elif tool_name == "kanban_request_changes":
+                    emit_card_event(CARD_UPDATED, card_id=task_id, status="todo", reason=(args or {}).get("reason"))
+            except Exception:
+                pass
         return None
     if tool_name != "terminal":
         return None
