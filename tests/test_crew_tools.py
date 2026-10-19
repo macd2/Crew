@@ -104,6 +104,11 @@ class VerdictTests(ToolTestCase):
         self.assertEqual(("PASS", crew_card.current_profile()), (lines[0]["verdict"], lines[0]["by"]))
         self.assertEqual(crew_card.verdict_path(cid), res["file"])
 
+    def test_verdict_accepts_card_id_as_alias_for_card(self):
+        cid = self.board_card("true")
+        res = call("crew_verdict", {"card_id": cid, "timeout": 30})
+        self.assertEqual(("PASS", 0, "true"), (res["verdict"], res["rc"], res["proof_command"]))
+
     def test_a_false_proof_fails_then_the_second_fail_is_handed_back(self):
         cid = self.board_card("false")
         stub = mock.Mock(returncode=0, stdout="ok", stderr="")
@@ -154,6 +159,12 @@ class ProgressTests(ToolTestCase):
         listing = call("crew_progress", {"card": "t_p"})
         self.assertEqual([("u1", True)], [(u["unit"], u["pass"]) for u in listing["units"]])
         self.assertEqual(1, listing["passed"])
+
+    def test_progress_accepts_card_id_as_alias_for_card(self):
+        first = call("crew_progress", {"card_id": "t_p", "unit": "u1", "result": "pass", "evidence": "ok"})
+        self.assertEqual(("PASS", "writer", 1, 1), (first["result"], first["by"], first["passed"], first["total"]))
+        listing = call("crew_progress", {"card_id": "t_p"})
+        self.assertEqual([("u1", True)], [(u["unit"], u["pass"]) for u in listing["units"]])
 
     def test_by_is_verifier_only_for_the_verifier_profile(self):
         with mock.patch.object(crew_card, "current_profile", lambda: "crew-verifier"):
@@ -211,6 +222,14 @@ class OtherToolTests(ToolTestCase):
         self.assertEqual(1, res["count"])
         self.assertIn(cid, res["text"])
 
+    def test_diagnose_accepts_card_id_as_alias_for_card(self):
+        kb, conn, _db = K.open_board(self.home)
+        self.addCleanup(conn.close)
+        cid = K.add_card(conn, "blocked")
+        res = call("crew_diagnose", {"card_id": cid})
+        self.assertEqual(1, res["count"])
+        self.assertIn(cid, res["text"])
+
 
 class RegisterTests(ToolTestCase):
     def test_six_tools_in_toolset_crew_each_with_schema_and_callable_handler(self):
@@ -238,6 +257,15 @@ class RegisterTests(ToolTestCase):
             crew_tools.register_tools(types.SimpleNamespace(register_tool=register_tool))
         self.assertEqual(5, len(seen))
         self.assertNotIn("crew_lesson", seen)
+
+    def test_schemas_declare_card_id_alias(self):
+        calls = []
+        crew_tools.register_tools(types.SimpleNamespace(register_tool=lambda **kw: calls.append(kw)))
+        tools_map = {c["name"]: c["schema"] for c in calls}
+        for name in ("crew_verdict", "crew_progress", "crew_diagnose"):
+            props = tools_map[name]["parameters"]["properties"]
+            self.assertIn("card", props, f"{name} must declare 'card'")
+            self.assertIn("card_id", props, f"{name} must declare 'card_id'")
 
 
 if __name__ == "__main__":

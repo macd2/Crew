@@ -52,6 +52,13 @@ def _need(args, key):
     return val
 
 
+def _card_arg(args):
+    val = args.get("card") if args.get("card") is not None else args.get("card_id")
+    if val is None or (isinstance(val, str) and not val.strip()):
+        raise ValueError("card is required")
+    return str(val).strip()
+
+
 def _is_verifier():
     """The calling profile is the verifier role. Only the prefixed name counts: role_profile() falls back to the
     current profile when the role has none, which would make every caller a verifier."""
@@ -61,7 +68,7 @@ def _is_verifier():
 @_guarded
 def crew_verdict(args):
     """The card's owner-confirmed proof, run and recorded under the calling profile. No command argument."""
-    card = str(_need(args, "card")).strip()
+    card = _card_arg(args)
     kw = {}
     if args.get("timeout") is not None:
         kw["timeout"] = int(args["timeout"])
@@ -79,7 +86,7 @@ def crew_verdict(args):
 @_guarded
 def crew_progress(args):
     """List a card's units, or mark one pass/fail with evidence. `by` comes from the profile, never an argument."""
-    card = str(_need(args, "card")).strip()
+    card = _card_arg(args)
     result = args.get("result")
     if result not in (None, "pass", "fail"):
         raise ValueError('result must be "pass" or "fail"')
@@ -121,7 +128,7 @@ def crew_plan(args):
 @_guarded
 def crew_diagnose(args):
     """Why each card in one board state is there: reason, wait, runs, failures, spend, coordinator decision."""
-    card = str(args.get("card") or "").strip() or None
+    card = str(args.get("card") or args.get("card_id") or "").strip() or None
     state = str(args.get("state") or "blocked").strip().lower()
     if not card and state not in _diag.STATES:
         raise ValueError("unknown state %r: %s" % (state, "|".join(_diag.STATES)))
@@ -147,16 +154,17 @@ SCHEMAS = {
         "description": "Run the card's owner-confirmed proof command and record the PASS/FAIL line in the verdict "
                        "log; takes no command of its own.",
         "parameters": _obj({"card": {"type": "string", "description": "the card id"},
-                                "timeout": {"type": "integer", "description": "seconds the proof may run (default 300)"}},
-                           ["card"])},
+                            "card_id": {"type": "string", "description": "alias for card"},
+                            "timeout": {"type": "integer", "description": "seconds the proof may run (default 300)"}})},
     "crew_progress": {
         "name": "crew_progress",
         "description": "List a card's units of work, or mark one unit pass or fail with evidence; the recording "
                        "role is taken from the calling profile, not from an argument.",
-        "parameters": _obj({"card": {"type": "string"},
-                                "unit": {"type": "string", "description": "the unit to mark; omit to list"},
-                                "result": {"type": "string", "enum": ["pass", "fail"]},
-                                "evidence": {"type": "string"}}, ["card"])},
+        "parameters": _obj({"card": {"type": "string", "description": "the card id"},
+                            "card_id": {"type": "string", "description": "alias for card"},
+                            "unit": {"type": "string", "description": "the unit to mark; omit to list"},
+                            "result": {"type": "string", "enum": ["pass", "fail"]},
+                            "evidence": {"type": "string"}})},
     "crew_proof_check": {
         "name": "crew_proof_check",
         "description": "Ask Hermes's danger check about a proof command before it is proposed (ok, flagged or "
@@ -166,21 +174,22 @@ SCHEMAS = {
         "name": "crew_lesson",
         "description": "Record one short lesson for a crew role; an agent may not write lessons for the role `all`.",
         "parameters": _obj({"role": {"type": "string", "description": "worker, content, verifier, coordinator"},
-                                "text": {"type": "string", "description": "one or two lines"}}, ["role", "text"])},
+                            "text": {"type": "string", "description": "one or two lines"}}, ["role", "text"])},
     "crew_plan": {
         "name": "crew_plan",
         "description": "Open a parent card, independent children and a close-out from a plan; a plan with a gap, "
                        "no children or two writers on one artifact is refused, and opening is refused outside a "
                        "/crew turn.",
         "parameters": _obj({"spec": {"type": "object", "description": "the plan: title, goal, children[]"},
-                                "dry_run": {"type": "boolean", "description": "check the plan, open nothing"}},
+                            "dry_run": {"type": "boolean", "description": "check the plan, open nothing"}},
                            ["spec"])},
     "crew_diagnose": {
         "name": "crew_diagnose",
         "description": "Read why each card in one board state is there (reason, wait, runs, spend, the "
                        "coordinator's last decision); read-only, an unknown state is refused.",
         "parameters": _obj({"state": {"type": "string", "enum": list(_diag.STATES)},
-                                "card": {"type": "string", "description": "one card id, any state"}})},
+                            "card": {"type": "string", "description": "one card id, any state"},
+                            "card_id": {"type": "string", "description": "alias for card"}})},
 }
 
 
