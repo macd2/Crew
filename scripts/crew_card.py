@@ -222,10 +222,24 @@ def is_batch_launcher(path):
 
 
 def hermes_exe():
-    """A real hermes.exe on Windows ("" when there is none): the installer's bin, then the venv beside Hermes's python."""
-    py = hermes_python()
-    for cand in (os.path.join(default_home(), "bin", "hermes.exe"),
-                 os.path.join(os.path.dirname(py), "hermes.exe") if py else ""):
+    """A real hermes.exe on Windows ("" when there is none): the checkout launcher, the installer's bin,
+    then an in-tree venv beside Hermes's python (excluding isolated PM package environments)."""
+    root = hermes_root()
+    py = hermes_python(root)
+    candidates = [
+        os.path.join(root, ".hermes", "bin", "hermes.exe"),
+        os.path.join(root, "bin", "hermes.exe"),
+        os.path.join(default_home(), "bin", "hermes.exe"),
+    ]
+    if py:
+        py_dir = os.path.dirname(py)
+        # PM environments under <home>/installs/<hash>/ are bound to package build snapshots (#124627)
+        # and register foreign install_ids that trigger shared profile warnings; do not adopt them.
+        norm_py = os.path.normpath(py_dir).lower()
+        if os.sep + "installs" + os.sep not in norm_py:
+            candidates.append(os.path.join(py_dir, "hermes.exe"))
+    for cand in candidates:
+        cand = os.path.normpath(cand) if cand else ""
         if cand and os.path.isfile(cand):
             return cand
     return ""
@@ -1109,7 +1123,14 @@ def _append_card_event(card_id, kind, payload, run_id=None, db=None):
 
 
 def hermes_root():
-    """Hermes's source tree: HERMES_AGENT_DIR, HERMES_SRC (the proofs' name for it), this home's, then the default."""
+    """Hermes's source tree: PROJECT_ROOT, HERMES_AGENT_DIR, HERMES_SRC, this home's, then the default."""
+    try:
+        import hermes_constants
+        _const_root = getattr(hermes_constants, "PROJECT_ROOT", None)
+        if _const_root and os.path.isdir(str(_const_root)):
+            return str(_const_root)
+    except Exception:
+        pass
     for path in (os.environ.get("HERMES_AGENT_DIR"), os.environ.get("HERMES_SRC"),
                  os.path.join(base_home(), "hermes-agent"), os.path.join(default_home(), "hermes-agent")):
         if path and os.path.isdir(path):
