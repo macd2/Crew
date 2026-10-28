@@ -161,6 +161,13 @@ def card_url(card_id, base=None):
     return "%s%s%s" % (base, CARD_ROUTE, urllib.parse.quote(str(card_id), safe=""))
 
 
+def card_md_link(card_id, base=None):
+    """The ticket id as a markdown link to its shareable card URL: "[<id>](<dashboard>/crew?card=<id>)". What the
+    Hermes Desktop card-open reply and the watcher's markdown endings print in place of a bare `<id>`: a left-click
+    opens the card in the in-app Crew tab (desktop.tsx watchCardLinks), right-click copies the shareable URL."""
+    return "[%s](%s)" % (card_id, card_url(card_id, base))
+
+
 GATEWAY_HEARTBEAT_STALE_S = 120   # hermes gateway/status.py _RUNTIME_STATUS_STALE_TTL_S: 2x its 60 s housekeeping beat
 GATEWAY_START_HINT = "hermes gateway run (or hermes gateway install to start it automatically)"
 
@@ -651,12 +658,6 @@ def coordinator_id(session=None):
     """
     sid = (session or os.environ.get("HERMES_SESSION_ID") or os.environ.get("HERMES_SESSION_KEY") or "").strip()
     return "%s/%s" % (current_profile(), sid or "no-session")
-
-
-# The pointer a Hermes Desktop chat message ends with: chat cannot open an in-app route and Windows runs no dashboard
-# server, so Desktop gets this plain line instead of a Crew Dashboard URL. One text for the card-open reply
-# (__init__._link_line) and the watcher's ending message (crew_notify._text with md=True).
-DESKTOP_LINE = "Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J"
 
 
 def origin_id(value):

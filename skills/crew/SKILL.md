@@ -218,20 +218,22 @@ In Hermes Desktop (the preload says "Hermes Desktop renders markdown") the reply
 watch command gets ` --md` appended at its end (`watch --card <id> --md`):
 
 ```
-**Card open** · `<id>` · <title>
+**Card open** · [<id>](<dashboard URL>/crew?card=<id>) · <title>
 
 I'll notify you here when it's done or if it needs you.
-
-> Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J
 ```
 
-When that watcher's ending comes back, send it on as it is: it is already markdown (bold status lead, short list, the
-same quoted pointer last). Everywhere else the plain three lines above stay. The link line is the LAST line of the reply, after the "I'll notify you here..." line, and nothing follows it. The preload
-gives it verbatim: `Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J` in Hermes Desktop, `Crew Dashboard: <dashboard URL>/crew?card=<id>`
-in the terminal and on every other surface. Replace `<id>` (terminal line only) with the card id and change nothing else. Leave the line out only
+The ticket id is the shareable link (`<dashboard URL>` is the one the preload gives, `<id>` filled in both places): a click
+opens the card in the in-app Crew tab, right-click copies the URL. The "I'll notify you here..." line is the last line;
+no pointer or quote follows it.
+
+When that watcher's ending comes back, send it on as it is: it is already markdown (bold status lead whose ticket id is the
+same shareable link, short list). Everywhere else the plain three lines above stay. The link line is the LAST line of the reply, after the "I'll notify you here..." line, and nothing follows it. The preload
+gives it verbatim: `Crew Dashboard: <dashboard URL>/crew?card=<id>` in the terminal and on every other surface (Hermes Desktop has
+no link line: its ticket id is the link). Replace `<id>` with the card id and change nothing else. Leave the line out only
 when the preload gave none. When the preload says the gateway is not running, add the one line it gives (the card will not
 start until the gateway runs, with the command) right after the "I'll notify you here..." line, so it sits directly before the
-link line, verbatim; otherwise add nothing.
+link line (in Hermes Desktop it is then the last line), verbatim; otherwise add nothing.
 
 The watcher only reads the board; it exits when the card is done and audited, needs the owner, or was abandoned, and
 its output comes back into this session as a new turn: relay it to the owner in one or two lines, nothing more.

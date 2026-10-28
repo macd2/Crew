@@ -177,6 +177,12 @@ class CardUrlTests(CardTestCase):
         self.assertEqual("http://127.0.0.1:8799/crew?card=t_1", crew_card.card_url("t_1"))
         self.assertEqual("http://dash/crew?card=a%2Fb%26c", crew_card.card_url("a/b&c", "http://dash"))
 
+    def test_card_md_link_is_the_id_as_a_markdown_anchor_on_the_shareable_link(self):
+        self.assertEqual("[t_d8403bb8](https://crew.example.test/crew?card=t_d8403bb8)",
+                         crew_card.card_md_link("t_d8403bb8", base="https://crew.example.test"))
+        os.environ["CREW_DASHBOARD_URL"] = "https://dash.example.test/"
+        self.assertEqual("[t_abc123](https://dash.example.test/crew?card=t_abc123)", crew_card.card_md_link("t_abc123"))
+
 
 class FmtTokensTests(unittest.TestCase):
     """fmt_tokens(n): the numbers printed in stats."""

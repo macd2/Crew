@@ -250,6 +250,21 @@ class NotifyTests(unittest.TestCase):
         self.assertIn("--- %s" % ORIGIN, out[0])
         self.assertEqual(before, open(self.state, encoding="utf-8").read())
 
+    # ---- the markdown form (Hermes Desktop): shareable ticket links, no manual pointer
+    def test_md_form_links_the_ticket_id_and_the_parent_and_drops_the_open_in_crew_quote(self):
+        parent = self.card()
+        child = self.card(parents=(parent,))
+        self.assertTrue(self.kb.complete_task(self.conn, parent, summary="parent done", force=True))
+        self.assertTrue(self.kb.complete_task(self.conn, child, summary="child done", force=True))
+        task = self.conn.execute("select * from tasks where id=?", (child,)).fetchone()
+        md = N._text(self.conn, task, "done", parent, md=True)
+        title = N.short(task["title"], 120)
+        self.assertTrue(md.startswith("**Done** · [%s](http://dash/crew?card=%s) · %s" % (child, child, title)), md)
+        self.assertIn("From card: [%s](http://dash/crew?card=%s) (this card was created under it)" % (parent, parent), md)
+        self.assertNotIn("Open it in Crew", md)
+        self.assertNotIn("Ctrl+J", md)
+        self.assertNotIn("`%s`" % child, md)
+
     # ---- the sender
     def test_hermes_send_calls_the_public_sender_for_the_owner_profile_with_the_text_on_stdin(self):
         with mock.patch.object(N.subprocess, "run") as run:

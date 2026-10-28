@@ -417,19 +417,30 @@ class BannerTests(unittest.TestCase):
         finally:
             os.environ.pop("CREW_DASHBOARD_URL", None)
 
-    def test_desktop_ends_with_open_in_crew(self):
+    def test_desktop_links_the_ticket_id_and_has_no_open_in_crew_pointer(self):
         ctx = self.ctx_for("desktop", "SB3")
         self.assertIn("LAST line", ctx)
         self.assertIn("after the \"I'll notify you here", ctx)
-        self.assertIn("Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", ctx)
+        self.assertIn("[<id>](https://crew.example.test/crew?card=<id>)", ctx)
+        self.assertNotIn("Open it in Crew", ctx)
+        self.assertNotIn("Ctrl+J", ctx)
         self.assertNotIn("Crew Dashboard:", ctx)
 
-    def test_desktop_reply_template_is_markdown_with_the_pointer_last_and_the_watcher_in_md(self):
-        ctx = self.ctx_for("desktop", "SB6")
+    def test_desktop_without_a_dashboard_url_keeps_the_id_in_code(self):
+        os.environ.pop("CREW_DASHBOARD_URL", None)
+        with unittest.mock.patch.object(self.plug, "_board_url", return_value=""):
+            ctx = self.plug.crew_intake_preload(user_message="/crew make it fast", session_id="SB31", turn_id="T",
+                                                platform="desktop")["context"].split("<skill")[0]
         self.assertIn("**Card open** · `<id>` · <title>", ctx)
-        self.assertIn("> Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", ctx)
+        self.assertNotIn("](/crew?card=", ctx)
+
+    def test_desktop_reply_template_is_markdown_with_the_shareable_link_and_the_watcher_in_md(self):
+        ctx = self.ctx_for("desktop", "SB6")
+        self.assertIn("**Card open** · [<id>](https://crew.example.test/crew?card=<id>) · <title>\n\n"
+                      "I'll notify you here when it's done or if it needs you.\n\n", ctx)
+        self.assertNotIn("**Card open** · `<id>`", ctx)
+        self.assertNotIn("> Open it in Crew", ctx)
         self.assertIn("`--md`", ctx)
-        self.assertLess(ctx.index("I'll notify you here when it's done"), ctx.index("> Open it in Crew"))
 
     def test_desktop_gets_the_markdown_proof_safety_question_others_do_not(self):
         ctx = self.ctx_for("desktop", "SB8")
@@ -455,8 +466,9 @@ class BannerTests(unittest.TestCase):
 
     def test_the_skill_carries_the_desktop_markdown_template(self):
         text = (REPO / "skills" / "crew" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("**Card open** · `<id>` · <title>", text)
-        self.assertIn("> Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", text)
+        self.assertIn("**Card open** · [<id>](<dashboard URL>/crew?card=<id>) · <title>", text)
+        self.assertNotIn("**Card open** · `<id>`", text)
+        self.assertNotIn("Open it in Crew", text)
         self.assertIn("watch --card <id> --md", text)
 
     def test_cli_tui_and_unknown_end_with_crew_dashboard(self):
@@ -468,14 +480,14 @@ class BannerTests(unittest.TestCase):
     def test_the_session_platform_is_the_fallback_for_the_hook_kwarg(self):
         os.environ["HERMES_SESSION_PLATFORM"] = "desktop"
         try:
-            self.assertIn("Open it in Crew:", self.ctx_for(None, "SB5"))
+            self.assertIn("**Card open** · [<id>](https://crew.example.test/crew?card=<id>)", self.ctx_for(None, "SB5"))
         finally:
             os.environ.pop("HERMES_SESSION_PLATFORM", None)
 
     def test_the_skill_says_the_link_is_last(self):
         text = (REPO / "skills" / "crew" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("LAST line of the reply, after the \"I'll notify you here...\" line", text)
-        self.assertIn("Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", text)
+        self.assertNotIn("Open it in Crew", text)
         self.assertIn("Crew Dashboard: <dashboard URL>/crew?card=<id>", text)
 
     def test_the_board_defaults_to_the_local_service(self):

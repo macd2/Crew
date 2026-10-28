@@ -160,29 +160,30 @@ class WatchTests(unittest.TestCase):
         N.mark_sent(self.state, cid, "done:%d" % ev)
         self.assertIn("already reported", self.check(cid)[0])
 
-    def test_md_endings_are_markdown_with_the_desktop_pointer_last_and_plain_ones_are_not(self):
+    def test_md_endings_are_markdown_with_a_shareable_ticket_link_and_plain_ones_are_not(self):
         cid = self.card(proof="")
         self.finish(cid, "built the page")
         plain = W.check(self.db, cid, self.state, time.time())[0]
         md = W.check(self.db, cid, self.state, time.time(), md=True)[0]
-        self.assertTrue(md.startswith("**Done** · `%s` · landing page" % cid), md)
+        self.assertTrue(md.startswith("**Done** · [%s](http://dash/crew?card=%s) · landing page" % (cid, cid)), md)
         self.assertIn("built the page", md)
         self.assertIn("- **Lands at:** /x/site", md)
-        self.assertEqual("> " + crew_card.DESKTOP_LINE, md.splitlines()[-1])
-        self.assertNotIn("http://dash", md)
+        self.assertNotIn("Open it in Crew", md)
+        self.assertFalse(md.splitlines()[-1].startswith("> "), md)
+        self.assertNotIn("`%s`" % cid, md)
         self.assertNotIn("**", plain)
         self.assertNotIn("> ", plain)
         self.assertEqual("Card: http://dash/crew?card=%s" % cid, plain.splitlines()[-1])
 
-    def test_md_needs_you_keeps_the_question_and_the_answer_hint_before_the_pointer(self):
+    def test_md_needs_you_keeps_the_question_and_the_answer_hint_last(self):
         cid = self.card(status="blocked")
         self.decide(cid, decision="ask_owner", question="Which palette?")
         md = W.check(self.db, cid, self.state, time.time(), md=True)[0]
-        self.assertTrue(md.startswith("**Needs you** · `%s`" % cid), md)
+        self.assertTrue(md.startswith("**Needs you** · [%s](http://dash/crew?card=%s)" % (cid, cid)), md)
         self.assertIn("Which palette?", md)
         lines = md.splitlines()
-        self.assertIn("/crew-unstuck %s" % cid, lines[-3])
-        self.assertEqual("> " + crew_card.DESKTOP_LINE, lines[-1])
+        self.assertIn("/crew-unstuck %s" % cid, lines[-1])
+        self.assertNotIn("Open it in Crew", md)
 
     def test_the_md_flag_is_wired_through_crew_card(self):
         cid = self.card(proof="")
@@ -193,7 +194,7 @@ class WatchTests(unittest.TestCase):
                               "--poll", "1", "--lifetime", "5"], capture_output=True, text=True, timeout=60,
                              env=dict(os.environ), encoding="utf-8", errors="replace")
         self.assertEqual(0, out.returncode, out.stderr)
-        self.assertIn("**Done** · `%s`" % cid, out.stdout)
+        self.assertIn("**Done** · [%s](http://dash/crew?card=%s)" % (cid, cid), out.stdout)
 
     def test_the_verb_is_wired_through_crew_card(self):
         cid = self.card(proof="")

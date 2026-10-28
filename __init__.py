@@ -1469,10 +1469,11 @@ def _gateway_down_line():
 # Desktop has no chat link that opens a plugin page: markdown renders a non-http href as <a target=_blank>
 # (apps/desktop/src/components/assistant-ui/markdown-text.tsx:322-340), the window-open handler denies every such open
 # (electron/main.ts:13544, window-open-policy.ts:92) and openExternalUrl admits only http/https/mailto
-# (electron/external-open.ts:71,131), so hermes://open/crew and #/crew?card= do nothing from chat. Desktop's own
-# host.navigate (the blocked-card toast) is not reachable from a chat message, and on Windows no dashboard server runs. So
-# Desktop gets a plain pointer to the Crew page and the flow pane (owner, 2026-10-19); every other surface gets the
-# "Crew Dashboard" URL.
+# (electron/external-open.ts:71,131), so hermes://open/crew and #/crew?card= do nothing from chat. An http(s) link does
+# render (ExternalLink), so in Desktop the ticket id itself is the shareable card link "[<id>](<dashboard>/crew?card=<id>)"
+# (crew_card.card_md_link): the Crew plugin's capture-phase click listener (ui/src/desktop.tsx watchCardLinks) turns a
+# plain left-click on it into host.navigate to the in-app Crew tab, and right-click still copies the URL. Every other
+# surface gets the "Crew Dashboard" URL as the last line.
 LINK_LABEL_DEFAULT = "Crew Dashboard"
 
 # The proof-safety question as the intake asks it in Hermes Desktop (markdown): a bold lead, the proof in a code block, the
@@ -1494,33 +1495,46 @@ def _surface(platform=""):
 
 
 def _link_line(platform=""):
-    """The last line of the card-open reply. Desktop: the pointer to the Crew page (no URL). Elsewhere, with `<id>` for the
-    model to fill: "Crew Dashboard: <dashboard URL>/crew?card=<id>", "" when no dashboard URL is known."""
+    """The last line of the card-open reply off Desktop, with `<id>` for the model to fill:
+    "Crew Dashboard: <dashboard URL>/crew?card=<id>", "" when no dashboard URL is known. Desktop has no link line:
+    the ticket id in its markdown lead is the shareable link itself (_desktop_id_ref)."""
     if _surface(platform) == "desktop":
-        tool = _card_tool()
-        return tool.DESKTOP_LINE if tool is not None else ""
+        return ""
     url = _board_url()
     return "%s: %s/crew?card=<id>" % (LINK_LABEL_DEFAULT, url.rstrip("/")) if url else ""
 
 
+def _desktop_id_ref():
+    """The ticket id in the Desktop card-open lead: the shareable markdown link "[<id>](<dashboard URL>/crew?card=<id>)"
+    (crew_card.card_md_link's shape, <id> left for the model). A plain left-click on it opens the card in the in-app Crew
+    tab (desktop.tsx watchCardLinks), right-click copies the URL. `<id>` in code when no dashboard URL is known."""
+    url = _board_url().rstrip("/")
+    return "[<id>](%s/crew?card=<id>)" % url if url else "`<id>`"
+
+
 def _banner_open(platform=""):
     """The preload prefix that makes the intake open its reply with the line, and names the link the card-open reply
-    ends with (owner, 2026-10-19: the link is the LAST line, after the notify line; in Desktop it points to the Crew
-    page and Ctrl+J, elsewhere "Crew Dashboard")."""
+    carries (owner, 2026-10-19: off Desktop the link is the LAST line, after the notify line, "Crew Dashboard"; in Desktop
+    the ticket id in the bold lead IS the shareable link, and the notify line ends the reply)."""
+    desktop = _surface(platform) == "desktop"
     link = _link_line(platform)
-    if link and _surface(platform) == "desktop":
-        # Hermes Desktop renders the reply as markdown (markdown-text.tsx): bold lead, plain notify line, the pointer as a quote.
-        tail = ("Hermes Desktop renders markdown. Write the card-open reply EXACTLY in this shape (<id> and <title> filled in):\n\n"
-                "**Card open** · `<id>` · <title>\n\nI'll notify you here when it's done or if it needs you.\n\n> %s\n\n"
-                "The quote line is the LAST line, after the \"I'll notify you here...\" line, and nothing follows it. Start the watcher "
-                "with `--md` after `watch --card <id>`; when its ending comes back, send it to the owner as it is (it is already "
-                "markdown, ending with the same pointer), do not reword it.\n\n" % link) + SAFETY_QUESTION_DESKTOP
+    if desktop:
+        # Hermes Desktop renders the reply as markdown (markdown-text.tsx): bold lead with the ticket link, plain notify line.
+        tail = ("Hermes Desktop renders markdown. Write the card-open reply EXACTLY in this shape (<id> and <title> filled in; "
+                "<id> appears as the link text and in the link):\n\n"
+                "**Card open** · %s · <title>\n\nI'll notify you here when it's done or if it needs you.\n\n"
+                "The ticket id is the shareable link: a click opens the card in the Crew tab, right-click copies the URL. The notify "
+                "line is the LAST line: nothing comes after the \"I'll notify you here...\" line (no pointer, no quote). Start the "
+                "watcher with `--md` after `watch --card <id>`; when its ending comes back, send it to the owner as it is (it is "
+                "already markdown, its lead links the card), do not reword it.\n\n" % _desktop_id_ref()) + SAFETY_QUESTION_DESKTOP
     else:
         tail = ("The card-open reply's LAST line, after the \"I'll notify you here...\" line, is this one, with <id> (if any) replaced "
                 "by the card id, verbatim otherwise: %s\n\n" % link) if link else ""
     down = _gateway_down_line()
+    where = ("as its last line, right after the \"I'll notify you here...\" line" if desktop or not link
+             else "right after the \"I'll notify you here...\" line and before the last line")
     gateway = ("The Hermes gateway is not running, so the card cannot start. Add this line to the card-open reply, "
-               "right after the \"I'll notify you here...\" line and before the last line, verbatim: %s\n\n" % down) if down else ""
+               "%s, verbatim: %s\n\n" % (where, down)) if down else ""
     return ("Open your reply with this line, verbatim, as its first line, then carry on with the intake:\n\n"
             "%s\n\n%s%s" % (_crew_banner(), tail, gateway))
 

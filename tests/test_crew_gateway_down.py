@@ -123,12 +123,23 @@ class IntakeLine(GatewayHome):
     def test_the_gateway_line_comes_before_the_last_line_link(self):
         os.environ["CREW_DASHBOARD_URL"] = "https://crew.example.test"
         try:
-            ctx = self.plugin().crew_intake_preload(user_message="/crew make it fast", session_id="GW3", turn_id="T", platform="desktop")["context"]
+            ctx = self.plugin().crew_intake_preload(user_message="/crew make it fast", session_id="GW3", turn_id="T", platform="cli")["context"]
         finally:
             os.environ.pop("CREW_DASHBOARD_URL", None)
         self.assertIn("The Hermes gateway is not running", ctx)
-        self.assertIn("Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", ctx)
+        self.assertIn("Crew Dashboard: https://crew.example.test/crew?card=<id>", ctx)
         self.assertIn("before the last line", ctx)
+
+    def test_in_desktop_the_gateway_line_ends_the_reply_under_the_linked_lead(self):
+        os.environ["CREW_DASHBOARD_URL"] = "https://crew.example.test"
+        try:
+            ctx = self.plugin().crew_intake_preload(user_message="/crew make it fast", session_id="GW4", turn_id="T", platform="desktop")["context"]
+        finally:
+            os.environ.pop("CREW_DASHBOARD_URL", None)
+        self.assertIn("The Hermes gateway is not running", ctx)
+        self.assertIn("**Card open** · [<id>](https://crew.example.test/crew?card=<id>) · <title>", ctx)
+        self.assertIn("as its last line", ctx)
+        self.assertNotIn("Open it in Crew", ctx)
 
     def test_no_line_when_the_gateway_runs(self):
         self.pid_file(str(os.getpid()))

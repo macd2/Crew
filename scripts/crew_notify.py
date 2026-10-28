@@ -75,6 +75,11 @@ def card_url(tid):
     return crew_card.card_url(tid, os.environ.get("CREW_CARD_BASE") or None)
 
 
+def card_md(tid):
+    """The ticket id as a shareable markdown link, "[<id>](<dashboard>/crew?card=<id>)" (crew_card.card_md_link)."""
+    return crew_card.card_md_link(tid, os.environ.get("CREW_CARD_BASE") or None)
+
+
 def state_file(board=None):
     """$HERMES_HOME/crew/notify-state[-board].json: one state per board, beside the coordinator's cursor."""
     suffix = "-%s" % board if board and board != "default" else ""
@@ -175,11 +180,12 @@ def _md_extra(extra):
 
 
 def _text_md(conn, task, kind, src, question="", extra=""):
-    """The same message as `_text`, as markdown for a Hermes Desktop chat: a bold status lead, the body, the
-    contract-style list, and the Crew pointer (crew_card.DESKTOP_LINE) LAST as a blockquote."""
+    """The same message as `_text`, as markdown for a Hermes Desktop chat: a bold status lead whose ticket id is the
+    shareable card link ([<id>](<dashboard>/crew?card=<id>): a left-click opens it in the in-app Crew tab, right-click
+    copies it), the body, and the contract-style list. No trailing pointer: the link is the way in."""
     tid, title = task["id"], short(task["title"], 120)
     lead = {"done": "**Done**", "abandoned": "**Abandoned**", "needs": "**Needs you**"}[kind]
-    parts = ["%s · `%s` · %s" % (lead, tid, title)]
+    parts = ["%s · %s · %s" % (lead, card_md(tid), title)]
     if kind == "done":
         summary = done_summary(conn, task)
         if summary:
@@ -204,10 +210,9 @@ def _text_md(conn, task, kind, src, question="", extra=""):
         if reason and reason != "initial_status":
             parts.append(reason)
     if src and src != tid:
-        parts.append("From card: `%s` (this card was created under it)" % src)
+        parts.append("From card: %s (this card was created under it)" % card_md(src))
     if extra and extra.strip():
         parts.append(_md_extra(extra))
-    parts.append("> " + crew_card.DESKTOP_LINE)
     return "\n\n".join(parts)
 
 
