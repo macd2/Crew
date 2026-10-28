@@ -3,7 +3,7 @@ import * as sdk from '@hermes/plugin-sdk'
 import { useTheme } from '@hermes/plugin-sdk'
 import type { CrewApi } from '../api'
 import { crewVarsFromTheme } from '../theme'
-import { cardFromHash, cardFromSearch } from '../open-card'
+import { cardFromHash, cardFromSearch, onOpenCard, takePendingCard } from '../open-card'
 import { setCardPageOpen } from '../card-open'
 import type { Route } from '../route'
 import { Board } from './Board'
@@ -18,15 +18,17 @@ let splashShown = false
 export function CrewPage({ api }: { api: CrewApi }) {
   const { theme, renderedMode } = useTheme()
   const [route, setRoute] = useState<Route>({ page: 'board', all: false })
-  // A link from outside opens that card: the blocked-card toast ("#/crew?card=<id>") on arrival and while the page is
-  // open; a shareable card link ("<dashboard>/crew?card=<id>", crew_card.card_url) on arrival.
+  // A link from outside opens that card: the card bus (open-card.openCardRoute: a chat ticket link, the blocked-card
+  // toast, the flow pane) on arrival (takePendingCard) and while the page is open (onOpenCard); the route's hash
+  // ("#/crew?card=<id>") likewise; a shareable card link ("<dashboard>/crew?card=<id>", crew_card.card_url) on arrival.
   useEffect(() => {
-    const go = () => { const id = cardFromHash(window.location.hash); if (id) setRoute({ page: 'card', id }) }
-    const shared = cardFromSearch(window.location.search)
-    if (shared) setRoute({ page: 'card', id: shared })
-    go()
+    const open = (id: string) => setRoute({ page: 'card', id })
+    const go = () => { const id = cardFromHash(window.location.hash); if (id) open(id) }
+    const first = takePendingCard() || cardFromHash(window.location.hash) || cardFromSearch(window.location.search)
+    if (first) open(first)
+    const off = onOpenCard(id => { takePendingCard(); open(id) })
     window.addEventListener('hashchange', go)
-    return () => window.removeEventListener('hashchange', go)
+    return () => { off(); window.removeEventListener('hashchange', go) }
   }, [])
   const back = () => setRoute({ page: 'board', all: false })
   // Desktop opens a chat through the plugin SDK's host contract: host.openSession(session, { profile }).

@@ -47,7 +47,7 @@ export const Button = ({ children, id, title, disabled, onClick, variant, size }
 // real navigate sets it)
 Object.assign(host, {
   notify: n => { (globalThis.__toasts = globalThis.__toasts || []).push(n); return n.id },
-  navigate: p => { window.location.hash = '#' + p }
+  navigate: p => { (globalThis.__navigated = globalThis.__navigated || []).push(p); window.location.hash = '#' + p }
 })
 export const ConfirmDialog = ({ open, title, onConfirm, onClose }) => open
   ? h('div', { id: 'confirm' }, h('b', null, title), h('button', { id: 'confirm-yes', onClick: onConfirm }, 'Confirm'), h('button', { id: 'confirm-no', onClick: onClose }, 'Cancel'))
@@ -377,6 +377,17 @@ ok((await mount(page.render)).includes('Crew could not load: boom'), 'page shows
     return { mod: await import(pathToFileURL(file).href + '?v=b' + (withHost ? 'h' : 'n')) }
   }
   await blockedChecks({ React, createRoot, window: dom.window, document, ok, eq, board, makePlugin })
+}
+// --- shareable ticket links in chat: capture-phase left-click opens the card in-app (tests/desktop_card_link_checks.mjs)
+{
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const { cardLinkChecks } = await import(pathToFileURL(path.join(here, 'desktop_card_link_checks.mjs')).href)
+  const makePlugin = async withHost => {
+    const file = path.join(tmp, withHost ? 'plugin-host-l.mjs' : 'plugin-nohost-l.mjs')
+    fs.writeFileSync(file, rewritten.replaceAll('"./sdk.mjs"', withHost ? '"./sdk-host.mjs"' : '"./sdk.mjs"'))
+    return { mod: await import(pathToFileURL(file).href + '?v=l' + (withHost ? 'h' : 'n')) }
+  }
+  await cardLinkChecks({ React, createRoot, window: dom.window, document, ok, eq, board, makePlugin })
 }
 // --- the flow graph, minimap and flow pane (tests/desktop_graph_checks.mjs)
 {

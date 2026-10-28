@@ -7,14 +7,19 @@ import { blockedWatch } from './blocked-watch'
 import { CrewPage } from './components/CrewPage'
 import { FlowPane } from './components/FlowPane'
 import { CrewHostContext, type CrewHost, type KanbanRow } from './host'
-import { CREW_ROUTE, cardLink } from './open-card'
+import { CREW_ROUTE, cardFromHref, cardLink, openCardRoute } from './open-card'
 import { crewVarsFromTheme } from './theme'
+
+export { cardFromHref, onOpenCard, openCardRoute, takePendingCard } from './open-card'
+
+// Every in-app open of a card goes through the card bus first (open-card.openCardRoute), then Desktop's router.
+const hostNavigate = (path: string) => { openCardRoute(path, p => sdk.host?.navigate?.(p)) }
 
 function Pane({ api }: { api: ReturnType<typeof restApi> }) {
   const { theme, renderedMode } = useTheme()
   return (
     <div style={{ ...crewVarsFromTheme(theme, renderedMode), background: 'var(--crew-bg)', color: 'var(--crew-fg)', height: '100%' }}>
-      <FlowPane api={api} navigate={path => sdk.host?.navigate?.(path)} cardLink={cardLink} boardLink={CREW_ROUTE} />
+      <FlowPane api={api} navigate={hostNavigate} cardLink={cardLink} boardLink={CREW_ROUTE} />
     </div>
   )
 }
@@ -103,7 +108,7 @@ function watchBlocked(ctx: WatchCtx, api: CrewApi) {
       title: 'Crew: a card needs you',
       message: t.message,
       detail: t.detail,
-      action: { label: 'Open in Crew', onClick: () => host.navigate?.(cardLink(t.id)) }
+      action: { label: 'Open in Crew', onClick: () => hostNavigate(cardLink(t.id)) }
     })
     try { ctx.os?.notify({ title: 'Crew: a card needs you', body: t.message + '\n' + t.detail }) } catch { /* no OS door: the toast stands */ }
   })
@@ -111,10 +116,45 @@ function watchBlocked(ctx: WatchCtx, api: CrewApi) {
   ctx.setInterval(() => { void tick() }, WATCH_MS)
 }
 
+// Shareable ticket links in chat ("[t_x](<dashboard>/crew?card=t_x)", crew_card.card_md_link) open in-app. Desktop's
+// chat renders an http(s) link as ExternalLink, whose onClick returns early when the event is already defaultPrevented
+// (apps/desktop/src/lib/external-link.tsx); this capture-phase listener on the document runs before it, takes only an
+// unmodified primary click on a Crew card link, and routes it through the card bus to the Crew tab. Ctrl/Cmd/Shift/Alt,
+// middle and right clicks (Copy Link) stay the app's, and so does any link that is not a Crew card. Links inside Crew's
+// own page are Crew's (its board and card controls), except a markdown block it renders (a transcript).
+const CARD_LINKS = '__crewCardLinks'   // the live listener's remover, on the document: a hot reload re-imports this module
+const MD_BLOCK = '.aui-md, .stub-md, .md'
+
+export function watchCardLinks(doc: Document = document): () => void {
+  const slot = doc as unknown as Record<string, (() => void) | undefined>
+  slot[CARD_LINKS]?.()
+  const onClick = (e: MouseEvent) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+    const navigate = sdk.host?.navigate
+    if (typeof navigate !== 'function') return
+    const t = e.target as Element | null
+    const a = t && typeof t.closest === 'function' ? t.closest('a[href]') : null
+    if (!a) return
+    if (a.closest('.crew-scope') && !a.closest(MD_BLOCK)) return
+    const id = cardFromHref(a.getAttribute('href') || '')
+    if (!id) return
+    e.preventDefault()
+    openCardRoute(cardLink(id), p => sdk.host?.navigate?.(p))
+  }
+  doc.addEventListener('click', onClick, true)
+  const off = () => {
+    doc.removeEventListener('click', onClick, true)
+    if (slot[CARD_LINKS] === off) slot[CARD_LINKS] = undefined
+  }
+  slot[CARD_LINKS] = off
+  return off
+}
+
 // Hermes Desktop loads the generated desktop/plugin.js: a page at /crew, a sidebar row, and the right-hand flow pane.
 // hideOnly keeps a close verb off the pane (closing the only plugin pane disables the plugin; track-model.ts:76-80).
 type WatchCtx = {
   setInterval?(fn: () => void, ms: number): () => void
+  onDispose?(fn: () => void): void
   os?: { notify(n: { title: string; body: string }): unknown }
 }
 
@@ -136,5 +176,9 @@ export default {
       }
     ])
     watchBlocked(ctx, api)
+    if (typeof sdk.host?.navigate === 'function' && typeof document !== 'undefined') {
+      const off = watchCardLinks(document)
+      if (typeof ctx.onDispose === 'function') ctx.onDispose(off)
+    }
   }
 }
