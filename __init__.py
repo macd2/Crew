@@ -1495,12 +1495,12 @@ def _surface(platform=""):
 
 def _link_line(platform=""):
     """The last line of the card-open reply. Desktop: the pointer to the Crew page (no URL). Elsewhere, with `<id>` for the
-    model to fill: "Crew Dashboard: <dashboard URL>/card/<id>", "" when no dashboard URL is known."""
+    model to fill: "Crew Dashboard: <dashboard URL>/crew?card=<id>", "" when no dashboard URL is known."""
     if _surface(platform) == "desktop":
         tool = _card_tool()
         return tool.DESKTOP_LINE if tool is not None else ""
     url = _board_url()
-    return "%s: %s/card/<id>" % (LINK_LABEL_DEFAULT, url) if url else ""
+    return "%s: %s/crew?card=<id>" % (LINK_LABEL_DEFAULT, url.rstrip("/")) if url else ""
 
 
 def _banner_open(platform=""):

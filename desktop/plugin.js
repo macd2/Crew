@@ -97,10 +97,15 @@ function crewVarsFromTheme(theme, mode = "light") {
 // src/open-card.ts
 var CREW_ROUTE = "/crew";
 var cardLink = (id, stamp = Date.now()) => CREW_ROUTE + "?card=" + encodeURIComponent(id) + "&n=" + stamp;
+var CARD_ID = /^[A-Za-z0-9_-]+$/;
 function cardFromHash(hash) {
   const m = /^#?\/crew\?(.*)$/.exec(hash || "");
   const id = m ? new URLSearchParams(m[1]).get("card") || "" : "";
-  return /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
+  return CARD_ID.test(id) ? id : "";
+}
+function cardFromSearch(search) {
+  const id = new URLSearchParams((search || "").replace(/^\?/, "")).get("card") || "";
+  return CARD_ID.test(id) ? id : "";
 }
 
 // src/card-open.ts
@@ -3245,6 +3250,8 @@ function CrewPage({ api }) {
       const id = cardFromHash(window.location.hash);
       if (id) setRoute({ page: "card", id });
     };
+    const shared = cardFromSearch(window.location.search);
+    if (shared) setRoute({ page: "card", id: shared });
     go();
     window.addEventListener("hashchange", go);
     return () => window.removeEventListener("hashchange", go);

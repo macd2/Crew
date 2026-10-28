@@ -46,7 +46,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -73,8 +72,7 @@ def short(text, n):
 
 
 def card_url(tid):
-    base = (os.environ.get("CREW_CARD_BASE") or crew_card.dashboard_url()).rstrip("/")
-    return "%s/card/%s" % (base, urllib.parse.quote(tid))
+    return crew_card.card_url(tid, os.environ.get("CREW_CARD_BASE") or None)
 
 
 def state_file(board=None):

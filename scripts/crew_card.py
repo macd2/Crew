@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 HERE_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -143,6 +144,21 @@ def dashboard_url():
     except (OSError, ValueError, AttributeError):
         pass
     return "http://127.0.0.1:%s" % (os.environ.get("CREW_GRAPH_PORT") or "8799")
+
+
+# The card detail route every outward link uses: "<dashboard>/crew?card=<id>". The hosted Crew tab (Hermes web
+# dashboard, Desktop's gateway) and the served shell (crew_graph_serve) all open the card from it; on the page side
+# ui/src/route.ts parseLocation and ui/src/open-card.ts cardFromSearch read it back.
+CARD_ROUTE = "/crew?card="
+
+
+def card_url(card_id, base=None):
+    """The shareable link to one card: <base or dashboard_url()>/crew?card=<id>. A base that already ends in the
+    /crew tab gets only the query."""
+    base = (base if base is not None else dashboard_url()).strip().rstrip("/")
+    if base.endswith("/crew"):
+        base = base[:-len("/crew")]
+    return "%s%s%s" % (base, CARD_ROUTE, urllib.parse.quote(str(card_id), safe=""))
 
 
 GATEWAY_HEARTBEAT_STALE_S = 120   # hermes gateway/status.py _RUNTIME_STATUS_STALE_TTL_S: 2x its 60 s housekeeping beat

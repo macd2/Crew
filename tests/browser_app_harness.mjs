@@ -67,6 +67,17 @@ function page(url, body, setup = () => {}) {
   ok(doc.querySelectorAll('.crew-graph .node').length === card.nodes.length, 'the card page drew every node of the fixture')
 }
 
+// --- the shareable card link crew sends out (crew_card.card_url): /crew?card=<id> opens that card; /crew alone is the board
+{
+  const { doc, fetchLog } = page('http://127.0.0.1:8799/crew?card=' + card.card_id, '<div id=crew-app></div>')
+  ok(await until(doc, '#crew-app .page-card .crew-graph .node'), '/crew?card=<id> draws the card page')
+  ok(fetchLog.some(f => f[0] === '/card/' + card.card_id + '.json'), '/crew?card=<id> polls that card')
+  const bare = page('http://127.0.0.1:8799/crew', '<div id=crew-app></div>')
+  ok(await until(bare.doc, '#crew-app .page-board'), '/crew with no card is the board')
+  const bad = page('http://127.0.0.1:8799/crew?card=a%20b', '<div id=crew-app></div>')
+  ok(await until(bad.doc, '#crew-app .page-board'), 'a card id outside [A-Za-z0-9_-] lands on the board')
+}
+
 // --- the dispatcher strip: drawn only when the board says the gateway is not running; an old server (no field) draws none
 {
   const { doc } = page('http://127.0.0.1:8799/', '<div id=crew-app></div>')
@@ -140,6 +151,16 @@ function hostRules(doc) {
   const before = fetchLog.length
   await settle(2300)
   eq(fetchLog.length, before, 'and the polling stops with it')
+}
+
+// --- hosted, arriving on a shareable card link ("<dashboard>/crew?card=<id>"): the tab opens that card
+{
+  const { doc, w, fetchLog } = page('http://127.0.0.1:9119/crew?card=' + card.card_id, '<div id=crew-app data-manual=1 data-base=/api/plugins/crew></div>')
+  const host = doc.getElementById('crew-app')
+  const unmount = w.__crewMount(host, { base: '/api/plugins/crew', fetch: (u, init) => w.fetch(u, init) })
+  ok(await until(host, '.page-card'), 'a hosted tab opened at /crew?card=<id> shows that card')
+  ok(fetchLog.some(f => f[0] === '/api/plugins/crew/card/' + card.card_id + '.json'), 'and reads it under the base')
+  unmount()
 }
 
 // --- an exported file: one card from the embedded snapshot, no server

@@ -66,6 +66,18 @@ class ShellServerTests(RealBoardCase):
             shells.add(text)
         self.assertEqual(len(shells), 1, "one shell for every route")
 
+    def test_the_crew_card_link_serves_the_shell_and_an_unknown_card_is_a_404(self):
+        _code, _hdr, board_shell = self.req("/")
+        for path in ("/crew?card=" + self.card, "/crew/?card=" + self.card, "/crew"):
+            code, hdr, body = self.req(path)
+            self.assertEqual(code, 200, path)
+            self.assertTrue(hdr["content-type"].startswith("text/html"), path)
+            self.assertEqual(body, board_shell, path)
+        code, _hdr, body = self.req("/crew?card=t_nosuchcard")
+        self.assertEqual(code, 404)
+        self.assertIn(b"no graph for t_nosuchcard", body)
+        self.assertEqual(self.req("/crew?card=a%2Fb")[0], 404)
+
     def test_a_card_page_for_an_unknown_id_is_a_404_not_a_shell(self):
         code, hdr, body = self.req("/card/t_nosuchcard")
         self.assertEqual(code, 404)

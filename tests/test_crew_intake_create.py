@@ -462,7 +462,7 @@ class BannerTests(unittest.TestCase):
     def test_cli_tui_and_unknown_end_with_crew_dashboard(self):
         for i, platform in enumerate(("cli", "tui", "telegram", "", None)):
             ctx = self.ctx_for(platform, "SB4%d" % i)
-            self.assertIn("Crew Dashboard: https://crew.example.test/card/<id>", ctx, platform)
+            self.assertIn("Crew Dashboard: https://crew.example.test/crew?card=<id>", ctx, platform)
             self.assertNotIn("Open it in Crew:", ctx, platform)
 
     def test_the_session_platform_is_the_fallback_for_the_hook_kwarg(self):
@@ -476,7 +476,7 @@ class BannerTests(unittest.TestCase):
         text = (REPO / "skills" / "crew" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("LAST line of the reply, after the \"I'll notify you here...\" line", text)
         self.assertIn("Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J", text)
-        self.assertIn("Crew Dashboard: <dashboard URL>/card/<id>", text)
+        self.assertIn("Crew Dashboard: <dashboard URL>/crew?card=<id>", text)
 
     def test_the_board_defaults_to_the_local_service(self):
         os.environ.pop("CREW_DASHBOARD_URL", None)

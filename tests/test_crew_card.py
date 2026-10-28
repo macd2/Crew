@@ -159,6 +159,25 @@ class OriginIdTests(unittest.TestCase):
         self.assertEqual("zulip:1|2", crew_card.origin_id("  zulip:1|2  "))
 
 
+class CardUrlTests(CardTestCase):
+    """card_url(id): the one card detail link crew sends out, <dashboard>/crew?card=<id>."""
+
+    def test_the_link_is_the_dashboard_plus_the_crew_route_and_the_card_query(self):
+        os.environ["CREW_DASHBOARD_URL"] = "https://crew.example.test/"
+        self.assertEqual("https://crew.example.test/crew?card=t_e8d8ae0c", crew_card.card_url("t_e8d8ae0c"))
+        self.assertNotIn("/card/", crew_card.card_url("t_e8d8ae0c"))
+
+    def test_an_explicit_base_wins_and_a_base_already_on_the_crew_tab_gets_only_the_query(self):
+        self.assertEqual("http://dash/crew?card=t_1", crew_card.card_url("t_1", "http://dash"))
+        self.assertEqual("https://h.example:9119/crew?card=t_1", crew_card.card_url("t_1", "https://h.example:9119/crew/"))
+
+    def test_the_local_service_is_the_fallback_and_the_id_is_quoted(self):
+        os.environ.pop("CREW_DASHBOARD_URL", None)
+        os.environ["CREW_GRAPH_PORT"] = "8799"
+        self.assertEqual("http://127.0.0.1:8799/crew?card=t_1", crew_card.card_url("t_1"))
+        self.assertEqual("http://dash/crew?card=a%2Fb%26c", crew_card.card_url("a/b&c", "http://dash"))
+
+
 class FmtTokensTests(unittest.TestCase):
     """fmt_tokens(n): the numbers printed in stats."""
 

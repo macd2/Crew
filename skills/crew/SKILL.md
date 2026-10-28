@@ -227,7 +227,7 @@ I'll notify you here when it's done or if it needs you.
 
 When that watcher's ending comes back, send it on as it is: it is already markdown (bold status lead, short list, the
 same quoted pointer last). Everywhere else the plain three lines above stay. The link line is the LAST line of the reply, after the "I'll notify you here..." line, and nothing follows it. The preload
-gives it verbatim: `Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J` in Hermes Desktop, `Crew Dashboard: <dashboard URL>/card/<id>`
+gives it verbatim: `Open it in Crew: the Crew entry in the sidebar, or preview it with Ctrl+J` in Hermes Desktop, `Crew Dashboard: <dashboard URL>/crew?card=<id>`
 in the terminal and on every other surface. Replace `<id>` (terminal line only) with the card id and change nothing else. Leave the line out only
 when the preload gave none. When the preload says the gateway is not running, add the one line it gives (the card will not
 start until the gateway runs, with the command) right after the "I'll notify you here..." line, so it sits directly before the

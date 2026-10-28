@@ -3,7 +3,7 @@ import * as sdk from '@hermes/plugin-sdk'
 import { useTheme } from '@hermes/plugin-sdk'
 import type { CrewApi } from '../api'
 import { crewVarsFromTheme } from '../theme'
-import { cardFromHash } from '../open-card'
+import { cardFromHash, cardFromSearch } from '../open-card'
 import { setCardPageOpen } from '../card-open'
 import type { Route } from '../route'
 import { Board } from './Board'
@@ -18,9 +18,12 @@ let splashShown = false
 export function CrewPage({ api }: { api: CrewApi }) {
   const { theme, renderedMode } = useTheme()
   const [route, setRoute] = useState<Route>({ page: 'board', all: false })
-  // A link from outside (the blocked-card toast: "#/crew?card=<id>") opens that card, on arrival and while the page is open.
+  // A link from outside opens that card: the blocked-card toast ("#/crew?card=<id>") on arrival and while the page is
+  // open; a shareable card link ("<dashboard>/crew?card=<id>", crew_card.card_url) on arrival.
   useEffect(() => {
     const go = () => { const id = cardFromHash(window.location.hash); if (id) setRoute({ page: 'card', id }) }
+    const shared = cardFromSearch(window.location.search)
+    if (shared) setRoute({ page: 'card', id: shared })
     go()
     window.addEventListener('hashchange', go)
     return () => window.removeEventListener('hashchange', go)

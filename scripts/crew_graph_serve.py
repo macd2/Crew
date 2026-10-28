@@ -9,7 +9,9 @@
   POST /ack/all     clear every listed notification at once (?undo=1 restores them); both writes go
                     into <dir of the board's kanban.db>/crew/attention_acks.json (CREW_ACK_FILE overrides) - never into the board. POST only, and
                     only from a same-origin page: a GET answers 405, a cross-site Origin answers 403.
-  /card/<id>        the same shell, showing one card's live flow graph (polls /card/<id>.json every 2s)
+  /crew?card=<id>   the same shell, showing one card's live flow graph (polls /card/<id>.json every 2s): the card
+                    link crew sends out (crew_card.card_url); /crew alone is the board
+  /card/<id>        the same card page, the older address (kept so links already sent still open)
   /card/<id>.json   the graph, rebuilt per request
   /healthz          text probe
 
@@ -32,7 +34,7 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -409,6 +411,7 @@ def ack_all(undo=False):
 # JSON routes below. No inline script, so the CSP below needs no nonce.
 APP_JS = os.path.join(HERE, "crew_dashboard", "app.js")
 CARD_PAGE_RX = re.compile(r"^/card/[A-Za-z0-9_-]+/?$")
+CARD_ID_RX = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def shell_page():
@@ -625,6 +628,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, body, "text/plain; charset=utf-8")
         show_all = "all=1" in (urlparse(self.path).query or "")
         if path in ("/", "/index.html", "/board"):
+            return self._send(200, shell_page(), "text/html; charset=utf-8")
+        if path in ("/crew", "/crew/"):
+            # the card link (crew_card.card_url): /crew?card=<id>; no card in the query is the board
+            card_id = (parse_qs(urlparse(self.path).query or "").get("card") or [""])[0]
+            if not card_id:
+                return self._send(200, shell_page(), "text/html; charset=utf-8")
+            if not CARD_ID_RX.match(card_id):
+                return self._send(404, "not found\n", "text/plain; charset=utf-8")
+            _graph, err = CG.build_graph(card_id)
+            if err:
+                return self._send(404, "no graph for %s (%s)\n" % (card_id, err), "text/plain; charset=utf-8")
             return self._send(200, shell_page(), "text/html; charset=utf-8")
         if CARD_PAGE_RX.match(path):
             # the shell for a card that exists; an id that names no card is a 404 here, not a page that fails to load

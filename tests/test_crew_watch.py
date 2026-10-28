@@ -172,7 +172,7 @@ class WatchTests(unittest.TestCase):
         self.assertNotIn("http://dash", md)
         self.assertNotIn("**", plain)
         self.assertNotIn("> ", plain)
-        self.assertEqual("Card: http://dash/card/%s" % cid, plain.splitlines()[-1])
+        self.assertEqual("Card: http://dash/crew?card=%s" % cid, plain.splitlines()[-1])
 
     def test_md_needs_you_keeps_the_question_and_the_answer_hint_before_the_pointer(self):
         cid = self.card(status="blocked")

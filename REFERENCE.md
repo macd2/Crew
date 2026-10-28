@@ -137,8 +137,8 @@ order. It reads the shared kanban board (`kanban.db`) and the per-profile sessio
 `tasks.session_id` when set, else matched by run time window. Run the script directly for the
 extra modes: `python3 scripts/crew_graph.py --card ID [--watch N|--json PATH|--html PATH]`
 (`--html` writes one file: the dashboard app inlined plus a snapshot of the card, no server needed, no polling).
-Always-on: `crew_graph_serve.py` (unit `crew-graph-http.service`) serves one thin page at `/` and `/card/<id>`
-(it loads `/app.js`, the React app in `scripts/crew_dashboard/app.js`), the data at `/board.json`,
+Always-on: `crew_graph_serve.py` (unit `crew-graph-http.service`) serves one thin page at `/`, `/crew?card=<id>`
+(the card link crew sends out) and `/card/<id>` (the older card address) (it loads `/app.js`, the React app in `scripts/crew_dashboard/app.js`), the data at `/board.json`,
 `/card/<id>.json` and `/healthz`, rebuilt per request. A card id that names no card answers 404.
 
 ### Card JSON fields the Desktop UI reads
@@ -254,7 +254,7 @@ scripts/crew_notify.py         the owner's return path: done / needs-you / aband
 scripts/crew_lessons.py        the lessons file: record (the `crew_lesson` tool), per-role injection blocks
 scripts/crew_watch.py          the in-session watcher (`crew_card.py watch --card <id>`): the intake runs it as a background terminal so a CLI session is told the ending; records it in notify-state so crew_notify stays silent
 scripts/crew_graph.py          live flow graph (terminal + --watch + self-contained HTML)
-scripts/crew_graph_serve.py    always-on HTTP surface for the graph (the shell at / and /card/<id>, /app.js, /board.json, /card/<id>.json, /healthz)
+scripts/crew_graph_serve.py    always-on HTTP surface for the graph (the shell at /, /crew?card=<id> and /card/<id>, /app.js, /board.json, /card/<id>.json, /healthz)
 scripts/crew_dashboard/app.js  the dashboard app (board, card page, flow graph) for the browser; GENERATED from ui/src/browser.tsx
 scripts/crew_dashboard/avatars/ + mark.svg + favicon.svg   the role faces, the header mark and the tab icon the server serves
 desktop/plugin.js      the Hermes Desktop page, GENERATED from ui/src/desktop.tsx (same components as app.js)

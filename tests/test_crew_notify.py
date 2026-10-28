@@ -85,7 +85,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(ORIGIN, target)
         self.assertIn("done · %s" % cid, text)
         self.assertIn("shipped the thing", text)
-        self.assertIn("Card: http://dash/card/%s" % cid, text)
+        self.assertIn("Card: http://dash/crew?card=%s" % cid, text)
         self.run_notify(s)                                  # the next tick
         self.run_notify(s)                                  # a restart reads the same state file
         self.assertEqual(1, len(s.calls))
