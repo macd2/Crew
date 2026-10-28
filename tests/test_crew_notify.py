@@ -260,6 +260,29 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(["-p", "owner", "send", "-t", ORIGIN, "--file", "-"], argv[1:])
         self.assertEqual("hello", run.call_args[1]["input"])
 
+    def test_multiline_structured_summary_and_long_needs_you_question_are_preserved(self):
+        cid = self.card(origin=ORIGIN)
+        structured = (
+            "- Done: synced main and origin/main at b15187fa\n"
+            "- Not done: agent_share.md skipped (out of scope)\n"
+            "- Evidence: verdict PASS, rc=0 (token=supersecret123)"
+        )
+        self.assertTrue(self.kb.complete_task(self.conn, cid, summary=structured, force=True))
+        s = Sender()
+        self.run_notify(s)
+        self.assertEqual(1, len(s.calls))
+        sent_text = s.calls[0][1]
+        self.assertIn("- Done: synced main and origin/main at b15187fa\n- Not done: agent_share.md skipped", sent_text)
+        self.assertIn("\n- Evidence: verdict PASS, rc=0 ([redacted])", sent_text)
+
+        blocked_id = self.card(status="blocked", origin=ORIGIN)
+        long_q = ("Why: sibling card pushed 2 commits. " + ("x" * 350)
+                  + " [diff: `assert len(log)==5` -> `assert len(log)>=5`]. Reply yes to accept it.")
+        self.decide(blocked_id, decision="ask_owner", question=long_q)
+        self.run_notify(s)
+        self.assertEqual(2, len(s.calls))
+        self.assertIn("assert len(log)>=5", s.calls[1][1])
+
 
 if __name__ == "__main__":
     unittest.main()

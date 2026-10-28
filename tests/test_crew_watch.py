@@ -206,6 +206,35 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(0, out.returncode, out.stderr)
         self.assertIn("done · %s" % cid, out.stdout)
 
+    def test_watch_surfaces_execution_trajectory_units_and_worker_progress_on_done_and_needs_you(self):
+        cid = self.card(status="blocked")
+        crew_card.start_progress(cid, ["sync-worktree", "verify-main"])
+        crew_card.record_progress(cid, unit="sync-worktree", result=True, evidence="b15187fa")
+        self.conn.execute(
+            "insert into task_runs (task_id, status, outcome, summary, started_at) values (?, 'blocked', 'blocked', ?, ?)",
+            (cid, "The sync is done: HEAD == origin/main == b15187fa; proof fails on len(log)==5", int(time.time())),
+        )
+        self.conn.commit()
+        self.decide(cid, decision="ask_owner", question="Why: sibling card pushed 2 commits. Accept len(log)>=5?")
+
+        md_needs = W.check(self.db, cid, self.state, time.time(), md=True)[0]
+        self.assertIn("**Needs you** · `%s`" % cid, md_needs)
+        self.assertIn("- **Progress:**", md_needs)
+        self.assertIn("1/2 units passed", md_needs)
+        self.assertIn("The sync is done: HEAD == origin/main == b15187fa", md_needs)
+        lines = md_needs.splitlines()
+        self.assertIn("/crew-unstuck %s" % cid, lines[-3])
+        self.assertEqual("> " + crew_card.DESKTOP_LINE, lines[-1])
+
+        crew_card.record_progress(cid, unit="verify-main", result=True, evidence="rc=0")
+        ev = self.finish(cid, "- Done: synced linearly at b15187fa\n- Not done: agent_share.md (out of scope)\n- Evidence: rc=0")
+        self.decide(cid, decision="audit", outcome="pass", why="again", for_event=ev)
+        md_done = W.check(self.db, cid, self.state, time.time(), md=True)[0]
+        self.assertIn("- Done: synced linearly at b15187fa\n- Not done: agent_share.md (out of scope)\n- Evidence: rc=0", md_done)
+        self.assertIn("- **Progress:**", md_done)
+        self.assertIn("2/2 units passed", md_done)
+        self.assertEqual("> " + crew_card.DESKTOP_LINE, md_done.splitlines()[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

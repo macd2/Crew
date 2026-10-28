@@ -411,11 +411,14 @@ class BannerTests(unittest.TestCase):
 
     def ctx_for(self, platform, session):
         os.environ["CREW_DASHBOARD_URL"] = "https://crew.example.test"
+        old_src = os.environ.pop("HERMES_SESSION_SOURCE", None)
         try:
             kw = {} if platform is None else {"platform": platform}
             return self.plug.crew_intake_preload(user_message="/crew make it fast", session_id=session, turn_id="T", **kw)["context"].split("<skill")[0]   # the preload, not the skill text
         finally:
             os.environ.pop("CREW_DASHBOARD_URL", None)
+            if old_src is not None:
+                os.environ["HERMES_SESSION_SOURCE"] = old_src
 
     def test_desktop_ends_with_open_in_crew(self):
         ctx = self.ctx_for("desktop", "SB3")

@@ -63,13 +63,24 @@ AUDIT_GRACE_S = int(os.environ.get("CREW_AUDIT_GRACE", "900"))
 STOP_EVENT_KINDS = ("blocked", "block_loop_detected", "gave_up")
 MAX_TRIES = 6
 SEND_TIMEOUT_S = 90
+DONE_SUMMARY_CHARS = 2000
+NEEDS_REASON_CHARS = 2000
 COORD_RX = re.compile(r"^\s*Coordinator:\s*(\S+)", re.M)
-SECRET_RX = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|(?i:(?:api[_-]?key|token|secret|password)\s*[=:]\s*)\S+)")
+SECRET_RX = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|(?i:(?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;)\]]+)")
 
 
 def short(text, n):
     text = SECRET_RX.sub("[redacted]", " ".join(str(text or "").split()))
     return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def short_multiline(text, n):
+    """Preserve line breaks for structured summaries (Done / Not done / Evidence) while redacting secrets and
+    bounding total length."""
+    lines = [" ".join(ln.split()) for ln in str(text or "").splitlines()]
+    cleaned = "\n".join(ln for ln in lines if ln)
+    cleaned = SECRET_RX.sub("[redacted]", cleaned)
+    return cleaned if len(cleaned) <= n else cleaned[: n - 1] + "…"
 
 
 def card_url(tid):
@@ -164,14 +175,14 @@ def done_summary(conn, task):
     """What a done card delivered: its newest run summary, else its result (the closing summary of the report)."""
     run = conn.execute("select summary from task_runs where task_id=? and summary is not null "
                        "order by id desc limit 1", (task["id"],)).fetchone()
-    return short((run["summary"] if run else None) or task["result"] or "", 600)
+    return short_multiline((run["summary"] if run else None) or task["result"] or "", DONE_SUMMARY_CHARS)
 
 
 def _md_extra(extra):
     """`Key: value` lines of the caller's extra block as a compact list, other sentences as plain lines."""
     out = []
     for line in (extra or "").strip("\n").splitlines():
-        m = re.match(r"^(Lands at|Proof):\s*(.*)$", line)
+        m = re.match(r"^(Lands at|Proof|Progress):\s*(.*)$", line)
         out.append("- **%s:** %s" % (m.group(1), m.group(2)) if m else line)
     return "\n".join(out)
 
@@ -202,7 +213,7 @@ def _text_md(conn, task, kind, src, question="", extra=""):
             reason = (json.loads(ev["payload"] or "{}") or {}).get("reason") if ev else ""
         except ValueError:
             reason = ""
-        reason = short(question or reason or task["last_failure_error"] or "", 300)
+        reason = short_multiline(question or reason or task["last_failure_error"] or "", NEEDS_REASON_CHARS)
         if reason and reason != "initial_status":
             parts.append(reason)
     if src and src != tid:
@@ -238,7 +249,7 @@ def _text(conn, task, kind, src, question="", extra="", md=False):
         reason = (json.loads(ev["payload"] or "{}") or {}).get("reason") if ev else ""
     except ValueError:
         reason = ""
-    reason = short(question or reason or task["last_failure_error"] or "", 300)
+    reason = short_multiline(question or reason or task["last_failure_error"] or "", NEEDS_REASON_CHARS)
     return ("🔴 needs you · %s · %s\n%s%s%s"
             % (tid, title, ("%s\n" % reason) if reason and reason != "initial_status" else "", tail, link))
 
