@@ -1304,12 +1304,15 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
                            "for /crew-safety brave|safe instead of setting approvals.mode yourself."}
     if role in CREW_ROLES and _board_write_attempt(tool_name, args):
         return {"action": "block",
-                "message": "board state and proof consent change only through the crew's tools, never a raw shell "
-                           "or a script of your own (sqlite3, task_events, proof_confirm, owner_proof_answer)."}
+                "message": "board state and proof consent change only through the crew's tools. A shell command "
+                           "that names sqlite3, kanban.db, task_events, proof_confirm or owner_proof_answer is "
+                           "refused, even a read. To read a card (its proof command, runs and last 50 events), "
+                           "call kanban_show(task_id=...)."}
     if role in WRITER_ROLES and _writes_crew_dir(tool_name, args):
         return {"action": "block",
-                "message": "proof files belong to the verifier: %s writes under .crew/ are refused. Fix the work, never "
-                           "the proof (reading .crew/ is fine)." % role}
+                "message": "proof files belong to the verifier: %s writes under .crew/ are refused (reading is "
+                           "fine). A missing proof script is expected; do not write one. Finish the work, then call "
+                           "kanban_request_review; the verifier writes and runs the proof." % role}
     if role == "coordinator" and os.environ.get("CREW_COORDINATOR_TURN"):
         if tool_name in COORDINATOR_TURN_BLOCKED:
             return {"action": "block",
