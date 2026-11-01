@@ -1031,7 +1031,8 @@ def _open_guard(tool_name, args, session_id, turn_id):
     cmd = str((args or {}).get("command") or "")
     if not CARD_OPEN_RX.search(cmd) or PROBE_TITLE_RX.search(cmd):
         return None
-    if _is_crew_turn(session_id, turn_id):
+    # A role process may open a card here too, as it may through crew_plan above and kanban_create.
+    if os.environ.get("HERMES_KANBAN_TASK") or _is_crew_turn(session_id, turn_id):
         return None
     return {"action": "block",
             "message": "crew cards open only from the owner's /crew command. This session has no "
