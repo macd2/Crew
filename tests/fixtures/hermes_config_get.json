@@ -1,0 +1,10 @@
+{
+  "_about": "What the real `hermes config get <key>` prints for each value shape, captured from a real Hermes. tests/hermes_fake.py must reproduce every row exactly (test_hermes_fake_contract.py); refresh with `python tests/test_hermes_fake_contract.py --refresh`.",
+  "shapes": [
+    {"name": "scalar",       "set": "hello",                                              "rc": 0, "stdout": "hello\n"},
+    {"name": "flat list",    "set": "[a,b]",                                              "rc": 0, "stdout": "  - a\n  - b\n"},
+    {"name": "empty list",   "set": "[]",                                                 "rc": 0, "stdout": "[]\n"},
+    {"name": "mapping list", "set": "[{\"provider\":\"p\",\"model\":\"m\",\"base_url\":\"u\"},{\"provider\":\"q\",\"model\":\"r\"}]", "rc": 0,
+     "stdout": "  - provider: p\n    model: m\n    base_url: u\n  - provider: q\n    model: r\n"}
+  ]
+}

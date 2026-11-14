@@ -139,7 +139,12 @@ def main():
     session = after_session if after_session != before_session else None
     tools = tool_calls(db, session) if session else None
     calls = tool_call_detail(db, session) if session else []
-    research = [c for c in calls if not c.startswith("clarify")]
+    # A one-shot turn has no clarify tool, and since Hermes defers tools behind tool_search (11-12 update) the
+    # model may spend one tool_search LOOKING FOR clarify before asking in prose (11-12, 11-13 nightlies). That
+    # reads no data, so it is not research; any other tool_search is.
+    asking = [c for c in calls if c.startswith("clarify")
+              or (c.startswith("tool_search") and "clarify" in c.lower())]
+    research = [c for c in calls if c not in asking]
 
     print("ask: %s" % VAGUE)
     print("exit code: %s   seconds: %.1f" % (proc.returncode, time.time() - t0))
@@ -153,7 +158,7 @@ def main():
           % (spill_cap(home) or "unset"))
     print("cards before: %s   after: %s" % (before_cards, after_cards))
 
-    ok = (proc.returncode == 0 and session is not None and not research and len(calls) <= 1
+    ok = (proc.returncode == 0 and session is not None and not research and len(calls) <= 2
           and tools == len(calls) and after_cards == before_cards)
     print("intake proof: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

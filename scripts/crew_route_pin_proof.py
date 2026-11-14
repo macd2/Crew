@@ -44,8 +44,9 @@ def check(name, ok, detail=""):
         FAILS.append(name)
 
 
-def run(cmd, timeout=180):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+def run(cmd, timeout=180, env=None):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+                          env=env)
 
 
 def worker_providers():
@@ -56,39 +57,92 @@ def worker_providers():
     return {m.group(1) for m in re.finditer(r"^(\S+) \(\d+ credentials?\):", r.stdout or "", re.M)}
 
 
-def dispatcher_argv(model=None, provider=None, route=None):
-    """The dispatcher's real argv builder, imported from the built-in install.
+# Hermes moved the worker's model off the spawn line: a claimed card now enters the profile owner's admission
+# queue, and the model is decided in gateway/session_kanban.build_kanban_policy (the worker argv is only
+# `-m hermes_cli.kanban_worker_client`). Since the 11-12 Hermes update the old argv check read that client line and
+# failed three nights running with nothing broken. The proof follows the seam the box actually has.
+POLICY_SEAM = ("gateway", "session_kanban.py")
 
-    `route` fixes what the routing hook answers, so both branches of the spawn line are testable in
-    one process: 'none' = nothing routed (the card's own pin decides), 'model' = a route-shaped
-    answer (the routed model wins and the pin is not used), None = leave the host's plugins alone.
+
+def _policy_seam():
+    return os.path.isfile(os.path.join(crew_proof_board.AGENT, *POLICY_SEAM))
+
+
+_STUB = (
+    "if %r == 'none':\n"
+    "    plugins.invoke_hook = lambda name, **kw: []\n"
+    "elif %r == 'model':\n"
+    "    plugins.invoke_hook = lambda name, **kw: [{'provider': 'p-routed', 'model': 'm-routed'}]\n")
+
+# The real build_kanban_policy over a throwaway board holding one claimed card; build_policy is captured, so
+# the check reads exactly the model/provider the owner would start the worker on.
+_POLICY_CODE = (
+    "import sys, json, tempfile, types\n"
+    "from pathlib import Path\n"
+    "sys.path.insert(0, %r)\n"
+    "from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, plugins\n"
+    "from hermes_cli.profiles import resolve_profile_env\n"
+    "import gateway.session_policy as sp, gateway.session_kanban as sk\n"
+    "%s"
+    "db = Path(tempfile.mkdtemp()) / 'kanban.db'\n"
+    "kbc.init_db(db)\n"
+    "conn = kbc.connect(db)\n"
+    "tid = kb.create_task(conn, title='x', assignee='crew-worker', model_override=%r, provider_override=%r)\n"
+    "t = kb.claim_task(conn, tid)\n"
+    "seen = {}\n"
+    "class Stop(Exception): pass\n"
+    "def cap(params, config, **kw):\n"
+    "    seen.update(params); raise Stop\n"
+    "sp.build_policy = cap\n"
+    "prof = resolve_profile_env('crew-worker')\n"
+    "c = types.SimpleNamespace(native_owner=True, authority=types.SimpleNamespace(profile_id=prof),\n"
+    "    actor=types.SimpleNamespace(profile_id=prof, capabilities={'session:create'}))\n"
+    "try:\n"
+    "    sk.build_kanban_policy(c, {'board': 'default', 'task_id': tid, 'run_id': t.current_run_id,\n"
+    "                               'claim_lock': t.claim_lock, 'db': str(db)}, {})\n"
+    "except Stop:\n"
+    "    pass\n"
+    "argv = []\n"
+    "if seen.get('model'): argv += ['-m', seen['model']]\n"
+    "if seen.get('provider'): argv += ['--provider', seen['provider']]\n"
+    "print(json.dumps(argv))\n")
+
+
+def dispatcher_argv(model=None, provider=None, route=None):
+    """The model a claimed card's worker starts on, as `-m <model> --provider <p>`, from the host's real code.
+
+    `route` fixes what the routing hook answers, so both branches are testable in one process: 'none' = nothing
+    routed (the card's own pin decides), 'model' = a route-shaped answer (the routed model wins and the pin is not
+    used), None = leave the host's plugins alone. On a Hermes with owner admission the decision is read from
+    build_kanban_policy; on an older one from the dispatcher's own argv builder.
     """
-    code = (
-        "import sys, dataclasses, json\n"
-        "sys.path.insert(0, %r)\n" % crew_proof_board.AGENT + 
-        ""
-        "from hermes_cli import kanban_db as kdb, kanban_db_dispatch as kd, plugins\n"
-        "if %r == 'none':\n"
-        "    plugins.invoke_hook = lambda name, **kw: []\n"
-        "elif %r == 'model':\n"
-        "    plugins.invoke_hook = lambda name, **kw: [{'provider': 'p-routed', 'model': 'm-routed'}]\n"
-        "t = kdb.Task(**{f.name: None for f in dataclasses.fields(kdb.Task)})\n"
-        "t.id, t.title, t.status, t.assignee, t.priority = 'tp', 'x', 'ready', 'crew-worker', 0\n"
-        "t.model_override = %r\n"
-        "t.provider_override = %r\n"
-        "print(json.dumps(kd._worker_argv(t, 'crew-worker', None)))\n" % (route, route, model, provider)
-    )
-    r = run([VENV_PY, "-c", code], timeout=180)
+    if _policy_seam():
+        code = _POLICY_CODE % (crew_proof_board.AGENT, _STUB % (route, route), model, provider)
+    else:
+        code = (
+            "import sys, dataclasses, json\n"
+            "sys.path.insert(0, %r)\n" % crew_proof_board.AGENT +
+            "from hermes_cli import kanban_db as kdb, kanban_db_dispatch as kd, plugins\n" +
+            _STUB % (route, route) +
+            "t = kdb.Task(**{f.name: None for f in dataclasses.fields(kdb.Task)})\n"
+            "t.id, t.title, t.status, t.assignee, t.priority = 'tp', 'x', 'ready', 'crew-worker', 0\n"
+            "t.model_override = %r\n"
+            "t.provider_override = %r\n"
+            "print(json.dumps(kd._worker_argv(t, 'crew-worker', None)))\n" % (model, provider)
+        )
+    env = dict(os.environ, PYTHONPATH=crew_proof_board.AGENT)
+    r = run([VENV_PY, "-c", code], timeout=180, env=env)
     if r.returncode != 0:
         return None, (r.stderr or "")[-200:]
     return json.loads(r.stdout.strip().splitlines()[-1]), ""
 
 
 def route_seam():
-    """True when this Hermes dispatcher asks plugins for a worker route (resolve_kanban_worker_route, the
-    free_first_router local patch); upstream Hermes has no such hook."""
+    """True when this Hermes asks plugins for a worker route (resolve_kanban_worker_route, the free_first_router
+    local patch) at the seam that decides the worker's model; upstream Hermes has no such hook."""
+    rel = POLICY_SEAM if _policy_seam() else ("hermes_cli", "kanban_db_dispatch.py")
     try:
-        with open(os.path.join(crew_proof_board.AGENT, "hermes_cli", "kanban_db_dispatch.py"), encoding="utf-8") as fh:
+        with open(os.path.join(crew_proof_board.AGENT, *rel), encoding="utf-8") as fh:
             return "resolve_kanban_worker_route" in fh.read()
     except OSError:
         return False
@@ -178,8 +232,8 @@ def main():
           (pinned or err)[-70:] if pinned else err)
     plain, err2 = dispatcher_argv(None, None, route="none")
     check("with nothing routed, an unpinned card spawns with no model override",
-          bool(plain) and "m-x" not in plain and "--provider" not in plain,
-          (plain or err2)[-60:] if plain else err2)
+          plain is not None and "m-x" not in plain and "--provider" not in plain,   # [] is the right answer
+          (plain or err2)[-60:] if plain is not None else err2)
     if route_seam():
         routed, err3 = dispatcher_argv("m-x", "p-y", route="model")
         check("a routed card spawns on the route, not on its stale pin",

@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.10.7-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.10.8-3fb950?style=flat-square)](plugin.yaml)
 [![tests](https://github.com/macd2/Crew/actions/workflows/tests.yml/badge.svg)](https://github.com/macd2/Crew/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -33,6 +33,19 @@ hands the card to a **coordinator** that owns it until the proof command exits 0
 result back in the same chat, or one concrete question when it truly needs you.
 
 [![The crew dashboard: a card's graph with its running worker selected and the live transcript](assets/dashboard.webp)](https://crew.forgecoreai.com)
+
+## What's new in 0.10.8
+
+- **The nightly proves what GitHub ships, nothing else.** Parity compares every crew home against the release
+  checkout's `origin/main`, and the nightly fetches and fast-forwards that checkout before it installs - an
+  unpushed local commit is never treated as a release.
+- **Proofs follow Hermes's owner-admission dispatch.** A card's model pin is now checked where Hermes decides the
+  worker's model (`build_kanban_policy`), not on the old spawn line, so the pin proof holds on current Hermes and
+  still runs on older ones.
+- **Fewer false reds.** The situation-box proof waits for the box to fill in instead of reading it once, and the
+  intake proof no longer counts a `tool_search` for the clarify tool as research.
+- **Tests use real Hermes output.** The installer's fake Hermes must match captured real `hermes config get` output
+  (`tests/test_hermes_fake_contract.py`), so a list-of-mappings setting can no longer re-apply on every install.
 
 ## What's new in 0.10.7
 

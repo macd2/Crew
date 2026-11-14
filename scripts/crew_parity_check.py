@@ -38,10 +38,21 @@ def release_tree(package=None):
     rel = os.environ.get("CREW_RELEASE") or os.path.join(base, "release")
     if not os.path.exists(os.path.join(rel, ".git")):
         return None
+    # The target is GitHub's latest main (owner, 2026-11-09), never a local commit: a release commit that was
+    # made here but not pushed is not a release. Fetch first; with no reachable origin/main, HEAD is the fallback.
+    ref = os.environ.get("CREW_RELEASE_REF") or "origin/main"
     try:
-        sha = subprocess.check_output(["git", "-C", rel, "rev-parse", "HEAD"], text=True,
+        subprocess.run(["git", "-C", rel, "fetch", "-q", "origin", "main"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        pass                                              # offline: the last fetched origin/main still answers
+    if subprocess.run(["git", "-C", rel, "rev-parse", "--verify", "-q", ref], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        ref = "HEAD"
+    try:
+        sha = subprocess.check_output(["git", "-C", rel, "rev-parse", ref], text=True,
                                       stderr=subprocess.DEVNULL).strip()
-        tar = subprocess.check_output(["git", "-C", rel, "archive", "--format=tar", "HEAD"],
+        tar = subprocess.check_output(["git", "-C", rel, "archive", "--format=tar", ref],
                                       stderr=subprocess.DEVNULL)
     except (OSError, subprocess.CalledProcessError):
         return None

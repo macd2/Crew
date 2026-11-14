@@ -177,7 +177,19 @@ def inspect(ws, card):
         except Exception:
             pass
         time.sleep(0.5)
-    return ws.evaluate(JS) or {}
+    # #sit appears before the box is filled in: on a loaded box (the nightly suite) a single read caught the head
+    # still empty (11-09, 10-29). Poll, bounded, until the box head has text; a real defect still fails on the
+    # last state read.
+    state = {}
+    for _ in range(30):
+        try:
+            state = ws.evaluate(JS) or {}
+        except Exception:
+            state = {}
+        if state.get("box") and str(state.get("headText") or "").strip():
+            break
+        time.sleep(0.5)
+    return state
 
 
 def check_pending(ws, card):

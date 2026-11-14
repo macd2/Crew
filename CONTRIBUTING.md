@@ -29,6 +29,10 @@ Thanks for helping. This file is short on purpose.
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `fix(board): ...`,
   `feat(installer): ...`.
 - Add tests where you can. For a bug fix, a test that fails without the fix is ideal.
+- A change that reads or writes a new shape of Hermes data (config value, CLI output, board field) adds a row to
+  `tests/fixtures/hermes_config_get.json` (or the matching fixture), captured from a real Hermes with
+  `python tests/test_hermes_fake_contract.py --refresh`. The test fakes must match real output; a fake written
+  from the code under test cannot find the case the code forgot.
 - Run the suite and make sure it passes:
 
   ```
