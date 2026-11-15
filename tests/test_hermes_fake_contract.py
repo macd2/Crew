@@ -14,6 +14,8 @@ HERE = Path(__file__).resolve().parent
 FIXTURE = HERE / "fixtures" / "hermes_config_get.json"
 sys.path.insert(0, str(HERE))
 from hermes_fake import FakeConfig  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+import install  # noqa: E402
 
 
 def _shapes():
@@ -44,9 +46,22 @@ class FakeMatchesRealHermes(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("hermes"), "no real hermes on PATH")
     def test_captured_shapes_still_match_a_real_hermes(self):
+        # Drift is judged by what the installer READS, not by bytes: Hermes versions differ in block-list indent
+        # (`  - a` on one, `- a` on upstream main, 2026-11-14 CI), and the installer reads both the same. A real
+        # change of shape (a list printed as JSON, a mapping flattened) still reads differently and fails here.
+        hermes = shutil.which("hermes")
         for s in _shapes():
             with self.subTest(shape=s["name"]):
-                self.assertEqual((s["rc"], s["stdout"]), _real(s["set"], shutil.which("hermes")))
+                rc, out = _real(s["set"], hermes)
+                self.assertEqual(s["rc"], rc)
+                self.assertEqual(install._parse_get(s["stdout"]), install._parse_get(out), out)
+
+    def test_block_list_indent_reads_the_same(self):
+        for flush, indented in (("- a\n- b\n", "  - a\n  - b\n"),
+                                ("- provider: p\n  model: m\n", "  - provider: p\n    model: m\n")):
+            with self.subTest(shape=flush):
+                self.assertEqual(install._parse_get(flush), install._parse_get(indented))
+                self.assertIsNotNone(install._parse_get(flush))
 
 
 if __name__ == "__main__":

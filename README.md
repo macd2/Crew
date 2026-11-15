@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.10.8-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.10.9-3fb950?style=flat-square)](plugin.yaml)
 [![tests](https://github.com/macd2/Crew/actions/workflows/tests.yml/badge.svg)](https://github.com/macd2/Crew/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -33,6 +33,12 @@ hands the card to a **coordinator** that owns it until the proof command exits 0
 result back in the same chat, or one concrete question when it truly needs you.
 
 [![The crew dashboard: a card's graph with its running worker selected and the live transcript](assets/dashboard.webp)](https://crew.forgecoreai.com)
+
+## What's new in 0.10.9
+
+- **CI green on upstream Hermes.** The fake-Hermes contract test judges drift by what the installer reads, not by
+  bytes: upstream Hermes prints block lists flush (`- a`) where earlier versions indented them (`  - a`), and the
+  installer reads both the same (`install._parse_get`, now covered by its own test).
 
 ## What's new in 0.10.8
 
