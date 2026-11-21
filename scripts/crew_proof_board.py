@@ -14,6 +14,7 @@ HERMES_BIN at a wrapper that resets HERMES_HOME, see crew_coordinator_proof.py.
 """
 import atexit
 import os
+import sqlite3
 import re
 import shutil
 import socket
@@ -237,6 +238,39 @@ def require_proof_board(name=None):
 def proof_db(name=None):
     """The board file a proof seeds (guarded), for its `KANBAN_DB = ...` line."""
     return require_proof_board(name)
+
+
+class _RetryingConnection(sqlite3.Connection):
+    """A board connection whose statements outlive a moment of contention.
+
+    The proofs board is one WAL file that the gateway's dispatcher opens every tick and the graph server
+    reads beside the proof. Two openers racing for the WAL lock end in `locking protocol`
+    (SQLITE_PROTOCOL), which the busy timeout does not cover, and a proof's seed died on its first delete
+    (crew_handoff_proof, 2026-11-21). Neither fault has run the statement, so running it again is safe."""
+    _TRANSIENT = ("locking protocol", "database is locked", "database table is locked")
+
+    def _again(self, call, *args):
+        for attempt in range(6):
+            try:
+                return call(*args)
+            except sqlite3.OperationalError as exc:
+                if attempt == 5 or not any(t in str(exc) for t in self._TRANSIENT):
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+
+    def execute(self, *args):
+        return self._again(super().execute, *args)
+
+    def executemany(self, *args):
+        return self._again(super().executemany, *args)
+
+    def commit(self):
+        return self._again(super().commit)
+
+
+def connect(db):
+    """Open a board for a proof's own seed, read or clean-up: 30 s busy timeout, transient faults retried."""
+    return sqlite3.connect(db, timeout=30, factory=_RetryingConnection)
 
 
 def free_port():

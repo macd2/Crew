@@ -79,7 +79,7 @@ def seed_probe():
     """A blocked card with a reason and a repeated stop, seeded straight into the board database."""
     card = "t_" + "".join(random.choice(string.hexdigits[:16]) for _ in range(8))
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute(
             "insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
@@ -106,7 +106,7 @@ def seed_probe():
 
 
 def drop_probe(card):
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (card,))
         conn.commit()
@@ -205,7 +205,7 @@ def quiet_card_with_a_ledger(exclude):
     WOULD stand on a card that keeps stopping - so the card that has neither is the honest one to
     prove the box leaves the tokens to the rail and the top area drops to two columns.
     """
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         ids = [r[0] for r in conn.execute(
             "select id from tasks where coalesce(status,'') != 'archived' order by rowid desc limit 40")]

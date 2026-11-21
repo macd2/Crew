@@ -57,7 +57,7 @@ def seed():
     os.makedirs(WS, exist_ok=True)
     with open(os.path.join(WS, "already-built.txt"), "w", encoding="utf-8") as fh:
         fh.write("work from the earlier run\n")
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (FRESH, OLD):
             conn.execute("delete from task_runs where task_id = ?", (cid,))
@@ -89,7 +89,7 @@ def seed():
 
 
 def drop():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (FRESH, OLD):
             conn.execute("update tasks set status = 'archived' where id = ?", (cid,))
@@ -153,7 +153,7 @@ def main():
     check("the injected block is the same text the builder makes",
           ((first or {}).get("context") or "").strip() == text.strip())
 
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         n = conn.execute("select count(*) from task_events where task_id = ? and kind = 'handoff'",
                          (OLD,)).fetchone()[0]
@@ -164,7 +164,7 @@ def main():
 
     r = subprocess.run([sys.executable, os.path.join(HERE, "crew_handoff.py"), "--card", OLD,
                         "--record"], capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         n2 = conn.execute("select count(*) from task_events where task_id = ? and kind = 'handoff'",
                           (OLD,)).fetchone()[0]
@@ -172,7 +172,7 @@ def main():
         conn.close()
     subprocess.run([sys.executable, os.path.join(HERE, "crew_handoff.py"), "--card", OLD, "--record"],
                    capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         n3 = conn.execute("select count(*) from task_events where task_id = ? and kind = 'handoff'",
                           (OLD,)).fetchone()[0]

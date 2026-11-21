@@ -80,7 +80,7 @@ def seed_probe(suffix, stops, reason=None):
     """
     card = "t_" + uuid.uuid4().hex[:8]
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute(
             # block_kind matters: the kernel re-classifies a blocked card with no kind and the
@@ -108,7 +108,7 @@ def seed_probe(suffix, stops, reason=None):
 
 
 def drop_probe(card):
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (card,))
         conn.commit()

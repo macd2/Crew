@@ -70,7 +70,7 @@ def get(path):
 def seed(status, runs):
     card = "t_" + "".join(random.choice(string.hexdigits[:16]) for _ in range(8))
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute(
             "insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
@@ -93,7 +93,7 @@ def seed(status, runs):
 
 
 def drop(card):
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (card,))
         conn.commit()

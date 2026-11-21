@@ -60,7 +60,7 @@ def card_nodes(graph):
 def seed():
     now = int(time.time())
     body = "Goal: probe child links.\nProof command: python3 crew_child_link_proof.py\n"
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (PARENT, SPAWNED, BORN, STRANGER, OUTSIDER):
             conn.execute("delete from task_runs where task_id = ?", (cid,))
@@ -96,7 +96,7 @@ def seed():
 
 
 def drop():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (PARENT, SPAWNED, BORN, STRANGER, OUTSIDER):
             conn.execute("update tasks set status = 'archived' where id = ?", (cid,))
@@ -108,7 +108,7 @@ def drop():
 
 def newest_decomposed():
     """(origin, child) of the newest card this board says it decomposed, or (None, None)."""
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         rows = conn.execute(
             "select task_id, payload from task_events where kind = 'created' "

@@ -59,7 +59,7 @@ def profile_exists(name):
 
 def seed(card=CARD):
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("delete from task_runs where task_id = ?", (card,))
         conn.execute("delete from task_events where task_id = ?", (card,))
@@ -75,7 +75,7 @@ def seed(card=CARD):
 
 
 def drop():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for c in (CARD, HOOK_CARD):
             conn.execute("update tasks set status = 'archived' where id = ?", (c,))
@@ -141,7 +141,7 @@ def main():
           and "openai/gpt-oss-120b" in (reroutes[0][1] or ""), (reroutes[0][1] or "")[:70] if reroutes else "")
 
     # 3. a completed run clears the counter
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("insert into task_events (task_id, run_id, kind, payload, created_at) "
                      "values (?,?,?,?,?)", (CARD, None, "completed", "{}", int(time.time())))

@@ -125,7 +125,7 @@ def fetch(path):
 
 def board_rows():
     """(the cards the board shows, the ids of the PROBE/TEST scaffolding it deliberately hides)."""
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     rows = conn.execute("select id, title, status from tasks where status != 'archived'").fetchall()
     conn.close()
     cards, probes = [], set()
@@ -181,7 +181,7 @@ def seed():
     """One waiting and one finished card on the proofs board, so the bell has rows to clear. They are not
     PROBE/TEST titled on purpose: that scaffolding never enters the notification list."""
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         drop(conn)
         for cid, (title, status, event) in SEEDS.items():
@@ -199,7 +199,7 @@ def seed():
 
 def drop(conn=None):
     own = conn is None
-    conn = conn or sqlite3.connect(KANBAN_DB)
+    conn = conn or crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in SEEDS:
             for table in ("task_runs", "task_events", "task_comments"):
@@ -413,6 +413,13 @@ def browser_leg():
                 ws.close()
             except Exception:
                 pass
+            # The page's own clear-all is still on its way when the drawn list is already empty (the list
+            # is drawn first, the POST follows). An undo sent now can reach the board BEFORE that clear, and
+            # the clear then lands second and stays: 0 of 3 with no defect behind it (2026-11-19, -20, -21).
+            # Wait until the board itself shows the clear, then undo.
+            _end = time.time() + 10
+            while rows_now()[1].get("total") not in (0, None) and time.time() < _end:
+                time.sleep(0.2)
             fetch("/ack/all?undo=1")
             # the undo lands on the board one poll behind the fetch, so a single read here reports 0 of 3 on a
             # busy box (2026-10-26 night) - wait for the total, then assert it
@@ -456,7 +463,7 @@ def live_legs():
         code, _ = fetch(target["ack_url"] + "?undo=1")
         back, _ = rows_now()
         check("undo puts the row back", code == 200 and target["id"] in [r["id"] for r in back])
-        conn = sqlite3.connect(KANBAN_DB)
+        conn = crew_proof_board.connect(KANBAN_DB)
         state = conn.execute("select status from tasks where id = ?", (target["id"],)).fetchone()
         conn.close()
         check("the card itself was never touched", bool(state) and state[0] == target["status"],

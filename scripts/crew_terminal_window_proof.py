@@ -62,7 +62,7 @@ def check(name, ok, detail=""):
 def seed_probe():
     """A card that has run: one assistant message with a tool call, straight into kanban.db."""
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("delete from task_runs where task_id = ?", (PROBE,))
         conn.execute("delete from tasks where id = ?", (PROBE,))
@@ -150,7 +150,7 @@ def drop_steps():
 
 
 def drop_probe():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (PROBE,))
         conn.commit()

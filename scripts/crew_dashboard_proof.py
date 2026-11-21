@@ -50,8 +50,19 @@ def fail(msg):
 
 
 def fetch(path):
-    with urllib.request.urlopen(URL + path, timeout=15) as resp:
-        return resp.read().decode("utf-8", "replace")
+    # One 15 s read with no second try was the whole proof on a busy box: the page builds the board per
+    # request, and a slow answer ended the run in a bare TimeoutError (2026-11-21). An HTTP error still fails.
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(URL + path, timeout=30) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError:
+            raise
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as exc:
+            if attempt == 2:
+                raise
+            print("the board did not answer %s (%s), trying again" % (path, type(exc).__name__))
+            time.sleep(2 * (attempt + 1))
 
 
 def board_rows():
@@ -118,7 +129,7 @@ def expected_working(now=None):
 def test_cards_out_of_the_numbers():
     """A test/scratch card is scaffolding: it must not enter the board's counts (5)."""
     probe = "t" + "9bo" + "ard_probe"
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("delete from tasks where id = ?", (probe,))
         conn.execute("insert into tasks (id, title, body, status, assignee, priority, created_by, created_at) "
@@ -140,7 +151,7 @@ def test_cards_out_of_the_numbers():
         return fail("the board does not report how many test cards it set aside")
     if probe not in ids_all:
         return fail("a test card is not reachable even with ?all=1")
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (probe,))
         conn.commit()

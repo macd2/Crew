@@ -172,7 +172,28 @@ def run_one(name, timeout, extra=()):
     except Exception as exc:  # noqa: BLE001 - one broken proof must not stop the run
         out, rc = "runner error: %s" % exc, 125
     return {"file": name, "rc": rc, "seconds": round(time.time() - started, 1),
-            "tail": "\n".join(out.strip().splitlines()[-3:])}
+            "tail": "\n".join(out.strip().splitlines()[-3:]), "log": keep_failure(name, rc, out)}
+
+
+def keep_failure(name, rc, out):
+    """Write a red proof's WHOLE output beside the proofs board and return the path ("" when green).
+
+    The summary keeps three lines, which is the end of a traceback or the last check and almost never the
+    cause: a red night could only be explained by re-running, and a load flake does not come back on demand.
+    The newest 40 files stay."""
+    if rc == 0:
+        return ""
+    try:
+        folder = os.path.join(crew_proof_board.proofs_dir(), "failures")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "%s-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), name[:-3]))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(out)
+        for old in sorted(os.listdir(folder))[:-40]:
+            os.remove(os.path.join(folder, old))
+        return path
+    except OSError:
+        return ""
 
 
 def default_jobs():
@@ -343,6 +364,8 @@ def main():
             print("  %7.1fs  %s  %s" % (r["seconds"], "PASS" if r["rc"] == 0 else "FAIL", r["file"]))
         for r in failed:
             print("  FAIL %s (exit %d)\n    %s" % (r["file"], r["rc"], r["tail"]))
+            if r.get("log"):
+                print("    full output: %s" % r["log"])
     if failed:
         print("RUNNER FAIL: %s" % ", ".join(r["file"] for r in failed))
         return 1

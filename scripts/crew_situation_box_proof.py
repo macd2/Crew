@@ -79,7 +79,7 @@ def seed_probe(suffix, status, reason=None):
     """
     card = "t_" + uuid.uuid4().hex[:8]
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute(
             "insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
@@ -105,7 +105,7 @@ def seed_probe(suffix, status, reason=None):
 
 
 def drop_probe(card):
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (card,))
         conn.commit()

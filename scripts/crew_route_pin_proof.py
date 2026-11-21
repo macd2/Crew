@@ -149,7 +149,7 @@ def route_seam():
 
 
 def seed():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("delete from task_runs where task_id = ?", (PROBE,))
         conn.execute("delete from task_events where task_id = ?", (PROBE,))
@@ -167,7 +167,7 @@ def seed():
 
 
 def drop():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         conn.execute("update tasks set status = 'archived' where id = ?", (PROBE,))
         conn.commit()

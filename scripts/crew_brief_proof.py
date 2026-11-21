@@ -58,7 +58,7 @@ def node_of(graph, kind):
 
 def seed():
     now = int(time.time())
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (WITH_BRIEF, GOAL_ONLY, BARE):
             conn.execute("delete from task_runs where task_id = ?", (cid,))
@@ -86,7 +86,7 @@ def seed():
 
 
 def drop():
-    conn = sqlite3.connect(KANBAN_DB)
+    conn = crew_proof_board.connect(KANBAN_DB)
     try:
         for cid in (WITH_BRIEF, GOAL_ONLY, BARE):
             conn.execute("update tasks set status = 'archived' where id = ?", (cid,))
