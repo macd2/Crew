@@ -87,6 +87,9 @@ COMMANDS = [
      "How careful unattended proof commands are: no argument shows the mode, brave stops asking, safe restores it"),
     ("crew-proof", "proof", "<card> <yes|brave>",
      "Answer a card's proof question: yes accepts a proposed proof command, brave runs a blocked one"),
+    ("crew-lineup", "lineup", "[use NAME | default | show NAME | add <url|path> | save NAME | uninstall NAME]",
+     "The crew's writer roles: no argument shows the lineup and the ones available, use NAME switches in the "
+     "background, uninstall NAME removes its role profiles (the lineup file stays)"),
 ]
 
 
@@ -142,8 +145,21 @@ def _card_body(task_id):
         return ""
 
 
-WRITER_ROLES = ("worker", "content")
-CREW_ROLES = ("coordinator", "worker", "content", "verifier")
+WRITER_ROLES = ("worker", "content")                              # the shipped crew: only a fallback
+CREW_ROLES = ("coordinator", "worker", "content", "verifier")     # read _crew_roles_now() instead
+
+
+def _crew_roles_now(tool=None):
+    """(writer roles, every role) of the installed crew, read from its roles.json each call (a lineup can
+    change it while this process runs). The shipped crew when the card tool cannot be loaded."""
+    try:
+        tool = tool or _card_tool()
+        if tool is not None:
+            writers = tuple(tool.writer_roles())
+            return writers, ("coordinator",) + writers + ("verifier",)
+    except Exception:  # noqa: BLE001 - fail safe to the shipped crew, never to no guard
+        pass
+    return WRITER_ROLES, CREW_ROLES
 
 
 def _card_tool():
@@ -254,7 +270,8 @@ def _cmd_safety(rest=""):
             if mode == "brave" else "A proof Hermes flags as dangerous stops the card and asks you.")))
     if want not in ("brave", "safe"):
         return "usage: /crew-safety [brave|safe]"
-    names = [r.get("name") for r in tool.roles_defaults().get("roles", []) if r.get("name")] or list(CREW_ROLES)
+    names = [r.get("name") for r in tool.roles_defaults().get("roles", []) if r.get("name")] \
+        or list(_crew_roles_now(tool)[1])
     state_path = os.path.join(tool.base_home(), "crew", "safety-approvals.json")
     try:
         with open(state_path, encoding="utf-8") as fh:
@@ -327,7 +344,7 @@ def _option_handler(action):
     """One slash command per option: the name carries the option, the text after it is its args."""
     run = {"status": _cmd_status, "graph": _cmd_graph, "unstuck": _cmd_unstuck,
            "stop": lambda rest: _cmd_maintenance("stop", rest), "safety": _cmd_safety,
-           "proof": _cmd_proof}[action]
+           "proof": _cmd_proof, "lineup": _cmd_lineup}[action]
 
     def handler(raw_args):
         return run((raw_args or "").strip())
@@ -1062,7 +1079,7 @@ def _is_crew_create(args, tool):
     """A kanban_create that makes a crew card: assigned to a crew writer profile, or carrying the crew
     body lines. Any other kanban card the owner makes in the chat is not crew's to gate."""
     args = args if isinstance(args, dict) else {}
-    writers = {tool.profile_prefix() + r for r in WRITER_ROLES}
+    writers = {tool.profile_prefix() + r for r in _crew_roles_now(tool)[0]}
     return str(args.get("assignee") or "") in writers or tool.is_crew_body(str(args.get("body") or ""))
 
 
@@ -1093,6 +1110,9 @@ def _create_guard(args, session_id, turn_id):
             "crew cards open only from the owner's /crew command. This session has no open crew intake, "
             "so kanban_create for a crew card is refused. Answer the owner normally; if they want crew "
             "work they type /crew <ask> and the intake runs in that turn.")
+    waited = _lineup_wait(tool, args)   # a role of the lineup being set up: wait for its profile
+    if waited:
+        return _create_refusal(waited)
     title = str(args.get("title") or "").strip()
     c = tool.parse_contract(str(args.get("body") or ""))
     c["title"] = title
@@ -1299,17 +1319,18 @@ def crew_tool_guard(tool_name=None, args=None, **kwargs):
     if blocked:
         return blocked
     role = _crew_role()
-    if role in CREW_ROLES and _crew_config_write_attempt(tool_name, args):
+    writer_roles, crew_roles = _crew_roles_now() if role else ((), ())
+    if role in crew_roles and _crew_config_write_attempt(tool_name, args):
         return {"action": "block",
                 "message": "the proof safety switch and the crew profiles' config belong to the owner: ask them "
                            "for /crew-safety brave|safe instead of setting approvals.mode yourself."}
-    if role in CREW_ROLES and _board_write_attempt(tool_name, args):
+    if role in crew_roles and _board_write_attempt(tool_name, args):
         return {"action": "block",
                 "message": "board state and proof consent change only through the crew's tools. A shell command "
                            "that names sqlite3, kanban.db, task_events, proof_confirm or owner_proof_answer is "
                            "refused, even a read. To read a card (its proof command, runs and last 50 events), "
                            "call kanban_show(task_id=...)."}
-    if role in WRITER_ROLES and _writes_crew_dir(tool_name, args):
+    if role in writer_roles and _writes_crew_dir(tool_name, args):
         return {"action": "block",
                 "message": "proof files belong to the verifier: %s writes under .crew/ are refused (reading is "
                            "fine). A missing proof script is expected; do not write one. Finish the work, then call "
@@ -1401,6 +1422,337 @@ def _record_brief(session_id, ask):
             _CREW_BRIEFS.pop(next(iter(_CREW_BRIEFS)), None)
 
 
+# ---------------------------------------------------------------- lineups (scripts/crew_lineup.py)
+# `/crew --lineup NAME <ask>` and `/crew-lineup use NAME` switch the crew's writer roles: the installer runs detached
+# in the background (it rebuilds the role profiles, and must never hold up a chat turn), the intake carries on at
+# once, and a card for a role of the lineup being set up waits in _create_guard until its profile exists.
+LINEUP_FLAG_RX = re.compile(r"(?:(?<=\s)|^)--lineup(?:=(\S*)|\s+(?!-)(\S+)|(?=\s|$))")
+LINEUP_WAIT_SECONDS = 120     # how long a kanban_create for a role still being set up waits for its profile
+LINEUP_POLL_SECONDS = 1.0
+LINEUP_BUILDING_STALE = 1800  # a "building" state older than this is a dead install: a new switch relaunches it
+DEFAULT_LINEUP = "default"
+
+
+def _lineup_tool():
+    """scripts/crew_lineup.py loaded as a module, or None."""
+    try:
+        return _load_script("crew_lineup.py", "crew_lineup_tool")
+    except Exception:  # noqa: BLE001 - a broken lineup script never breaks a chat turn
+        return None
+
+
+def _split_lineup(ask):
+    """(lineup name or None, the ask without the flag). `--lineup NAME` or `--lineup=NAME`, anywhere in the ask;
+    a bare `--lineup` gives the name "" (the caller reports it)."""
+    ask = ask or ""
+    m = LINEUP_FLAG_RX.search(ask)
+    if not m:
+        return None, ask.strip()
+    name = (m.group(1) if m.group(1) is not None else m.group(2)) or ""
+    rest = (ask[:m.start()].rstrip() + " " + ask[m.end():].lstrip()).strip()
+    return name.strip(), rest
+
+
+def _lineup_state(lu=None):
+    lu = lu or _lineup_tool()
+    try:
+        state = lu.read_state() if lu is not None else None
+    except Exception:  # noqa: BLE001 - an unreadable state file is the default crew
+        state = None
+    return state if isinstance(state, dict) else {}
+
+
+def _crew_folder(lu=None):
+    try:
+        if lu is not None:
+            return lu.crew_dir()
+    except Exception:  # noqa: BLE001
+        pass
+    tool = _card_tool()
+    return os.path.join(tool.base_home() if tool is not None else HOME, "crew")
+
+
+def _install_source():
+    """The crew package checkout holding install.py: crew_card.package_dir() (CREW_PKG, this checkout, or the path
+    the installer recorded), else config crew.source_dir. None when neither has install.py."""
+    tool = _card_tool()
+    cands = []
+    try:
+        cands.append(tool.package_dir() if tool is not None else None)
+    except Exception:  # noqa: BLE001
+        pass
+    cands.append(HERE)
+    for src in cands:
+        if src and os.path.isfile(os.path.join(src, "install.py")):
+            return src
+    src = _config_get("crew.source_dir")
+    if src and os.path.isfile(os.path.join(src, "install.py")):
+        return src
+    return None
+
+
+def _installing_profile():
+    tool = _card_tool()
+    try:
+        return tool.owner_profile() if tool is not None else _profile_name()
+    except Exception:  # noqa: BLE001
+        return _profile_name()
+
+
+def _launch_lineup_install(name, lu, flag="--lineup"):
+    """Start `install.py --profile P --lineup NAME` (or another flag, --uninstall-lineup) detached, output to
+    <crew>/lineup-install.log. Returns the log path."""
+    src = _install_source()
+    if not src:
+        raise OSError("install.py not found (no crew package checkout; run the installer from the package)")
+    log = os.path.join(_crew_folder(lu), "lineup-install.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    argv = [sys.executable, os.path.join(src, "install.py"), "--profile", _installing_profile(), flag, name]
+    kw = {"stdin": subprocess.DEVNULL, "stderr": subprocess.STDOUT, "cwd": src, "env": _utf8_env()}
+    if os.name == "nt":
+        kw["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0x8)
+                               | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+                               | getattr(subprocess, "CREATE_NO_WINDOW", 0x8000000))
+    else:
+        kw["start_new_session"] = True
+    with open(log, "ab") as fh:
+        fh.write(("\n== %s lineup %s: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), name, " ".join(argv)))
+                 .encode("utf-8", "replace"))
+        fh.flush()
+        subprocess.Popen(argv, stdout=fh, **kw)
+    return log
+
+
+def _lineup_switch(name):
+    """Make `name` the crew's lineup. Returns (status, text): status "error" (text is the error), "active" (already the
+    ready lineup, nothing started), "building" (already being set up, nothing started) or "started"."""
+    name = (name or "").strip()
+    if not name:
+        return "error", "--lineup needs a lineup name (see /crew-lineup for the list)"
+    lu = _lineup_tool()
+    if lu is None:
+        return "error", "crew_lineup.py not found - run install.py --check"
+    if name == DEFAULT_LINEUP:
+        canon, roles, source = DEFAULT_LINEUP, [], ""
+    else:
+        try:
+            source = lu.find(name)
+            data = lu.load(name)
+        except Exception as exc:  # noqa: BLE001 - LineupError and anything else: the owner gets the message
+            return "error", "lineup %s: %s" % (name, str(exc).strip() or exc.__class__.__name__)
+        canon = str(data.get("name") or name)
+        roles = [str(r.get("name")) for r in data.get("roles") or [] if isinstance(r, dict) and r.get("name")]
+    state = _lineup_state(lu)
+    active = str(state.get("active") or DEFAULT_LINEUP)
+    status = str(state.get("status") or ("ready" if not state else ""))
+    if active == canon and status == "ready":
+        return "active", "lineup %s is already the crew's lineup" % canon
+    if active == canon and status == "building" \
+            and time.time() - float(state.get("updated") or 0) < LINEUP_BUILDING_STALE:
+        return "building", "lineup %s is already being set up" % canon
+    try:
+        log = _launch_lineup_install(name, lu)
+    except Exception as exc:  # noqa: BLE001
+        return "error", "lineup %s: the installer could not start: %s" % (canon, exc)
+    try:
+        lu.write_state(active=canon, status="building", error="", roles=roles, updated=time.time(), source=source)
+    except Exception:  # noqa: BLE001 - the installer writes the state as well
+        pass
+    return "started", "lineup %s is being set up in the background (log: %s)" % (canon, log)
+
+
+def _lineup_context(name):
+    """What the intake is told about a `--lineup NAME` in the owner's /crew: always that the flag is not part of the
+    ask; on an error, to tell the owner in one line and carry on with the current crew."""
+    status, text = _lineup_switch(name)
+    head = "The owner's `--lineup %s` option was handled by the crew plugin; it is not part of the ask. " % name
+    if status == "error":
+        return head + ("It failed: %s. Tell the owner that in one line, then continue the intake with the current "
+                       "crew.\n\n" % text)
+    if status == "active":
+        return head + "Nothing to set up: %s.\n\n" % text
+    return head + ("%s. Do not wait for it and do not mention the log unless asked: continue the intake now; a card "
+                   "for one of its roles (listed in the crew facts) waits for its profile by itself.\n\n" % text)
+
+
+def _role_line(entries):
+    return "; ".join("%s — %s" % (str(r.get("name")), str(r.get("purpose") or "").strip() or "no purpose given")
+                     for r in entries if r.get("name"))
+
+
+def _lineup_facts(tool):
+    """The writer roles of the crew, and of a lineup being set up, as one fact block's lines."""
+    try:
+        writers = set(tool.writer_roles())
+        entries = [r for r in tool.role_entries() if str(r.get("name") or "").strip().lower() in writers]
+        if not entries:
+            entries = [{"name": w, "purpose": ""} for w in tool.writer_roles()]
+        prefix = tool.profile_prefix()
+    except Exception:  # noqa: BLE001 - an older or fake card tool: no roles line, the other facts still render
+        return ""
+    line = ("Writer roles in this crew (the card's Role line; assignee %s<role>, skills [\"crew-role-<role>\"]): %s."
+            % (prefix, _role_line(entries)))
+    lu = _lineup_tool()
+    state = _lineup_state(lu) if lu is not None else {}
+    if state.get("status") == "building" and state.get("active"):
+        name = str(state["active"])
+        try:
+            data = lu.load(name) if name != DEFAULT_LINEUP else {"roles": []}
+            building = [{"name": r.get("name"), "purpose": r.get("purpose")} for r in data.get("roles") or []]
+        except Exception:  # noqa: BLE001 - the state's role names are enough
+            building = [{"name": n, "purpose": ""} for n in state.get("roles") or []]
+        if name == DEFAULT_LINEUP:
+            line += "\nLineup default (worker, content) is being set up now."
+        elif building:
+            line += ("\nLineup %s is being set up now; its writer roles can already be picked (the card waits for the "
+                     "profile): %s." % (name, _role_line(building)))
+    elif state.get("status") == "failed":
+        line += "\nThe last lineup switch (%s) failed: %s." % (state.get("active") or "?", state.get("error") or "see "
+                                                               "/crew-lineup")
+    return line
+
+
+def _lineup_wait(tool, args):
+    """None when a crew kanban_create may go on; else the refusal text. A card for a role of the lineup being set up
+    whose profile does not exist yet waits (LINEUP_POLL_SECONDS, at most LINEUP_WAIT_SECONDS) for the installer.
+    A role in neither the crew nor the lineup is left to the contract check, which names the valid roles."""
+    prefix = tool.profile_prefix()
+    role = str(tool.parse_contract(str(args.get("body") or "")).get("role") or "").strip().lower()
+    assignee = str(args.get("assignee") or "").strip()
+    if not role and assignee.startswith(prefix):
+        role = assignee[len(prefix):].strip().lower()
+    if not role:
+        return None
+    profile = prefix + role
+
+    def installed():
+        return role in tool.writer_roles() and tool.profile_exists(profile)
+
+    if installed():
+        return None
+    lu = _lineup_tool()
+    if lu is None:
+        return None
+    state = _lineup_state(lu)
+    if state.get("status") != "building" or role not in [str(r).lower() for r in state.get("roles") or []]:
+        return None
+    deadline = time.time() + LINEUP_WAIT_SECONDS
+    while True:
+        if state.get("status") == "failed":
+            return ("lineup %s failed to install: %s. Tell the owner (they can retry with /crew-lineup use %s), and "
+                    "pick a writer role of the current crew instead."
+                    % (state.get("active"), state.get("error") or "see lineup-install.log", state.get("active")))
+        if installed() or state.get("status") != "building":
+            return None
+        if time.time() >= deadline:
+            return "%s is still being set up; call kanban_create again in a minute." % profile
+        time.sleep(LINEUP_POLL_SECONDS)
+        state = _lineup_state(lu)
+
+
+def _cmd_lineup(rest=""):
+    """/crew-lineup [use NAME | default | show NAME | add <url|path> | save NAME | uninstall NAME [--yes]]."""
+    words = (rest or "").split()
+    sub = words[0].lower() if words else ""
+    yes = sub == "uninstall" and "--yes" in words[1:]
+    arg = " ".join(w for w in words[1:] if not (yes and w == "--yes")).strip()
+    usage = ("usage: /crew-lineup [use NAME | default | show NAME | add <url|path> | save NAME | "
+             "uninstall NAME [--yes]]")
+    lu = _lineup_tool()
+    if lu is None:
+        return "crew_lineup.py not found - run install.py --check"
+    try:
+        if not sub:
+            return _lineup_overview(lu)
+        if sub == "default" and not arg:
+            sub, arg = "use", DEFAULT_LINEUP
+        if sub == "use" and arg:
+            status, text = _lineup_switch(arg)
+            if status == "started":
+                return text + ". /crew-lineup shows when it is ready."
+            return text
+        if sub == "show" and arg:
+            if arg == DEFAULT_LINEUP:
+                return "lineup default: the shipped crew, writer roles worker and content."
+            return lu.preview(arg)
+        if sub == "add" and arg:
+            name, text = lu.fetch(arg)
+            return ("%s\n\nNothing saved yet; run /crew-lineup save %s to keep it." % (str(text).rstrip(), name))
+        if sub == "save" and arg:
+            got = lu.commit_pending(arg)
+            return _saved_text(arg, got)
+        if sub == "uninstall" and arg:
+            return _lineup_uninstall(lu, arg, yes)
+    except Exception as exc:  # noqa: BLE001 - LineupError and anything else becomes the reply, never a broken turn
+        return "crew-lineup %s failed: %s" % (sub or "", exc)
+    return usage
+
+
+def _lineup_uninstall(lu, name, yes):
+    """/crew-lineup uninstall NAME: without --yes, what would go; with it, the installer's --uninstall-lineup in the
+    background (the reverse of installing: role profiles and their skills go, the lineup file stays)."""
+    plan = lu.uninstall_plan(name)
+    prefix = _card_tool().profile_prefix() if _card_tool() is not None else "crew-"
+    text = lu.describe_uninstall(plan, prefix)
+    if not yes:
+        return ("%s\n\nNothing changed yet. Cards still open on these roles stop the uninstall. Run "
+                "/crew-lineup uninstall %s --yes to do it." % (text, name))
+    log = _launch_lineup_install(name, lu, flag="--uninstall-lineup")
+    return ("%s\n\nUninstalling in the background (log: %s); /crew-lineup shows the crew when it is done."
+            % (text, log))
+
+
+def _saved_text(name, got):
+    """commit_pending's answer as owner text: what was written, what was overwritten."""
+    if isinstance(got, str):
+        return got
+    written, over = [], []
+    if isinstance(got, dict):
+        written = list(got.get("written") or got.get("files") or [])
+        over = list(got.get("overwritten") or [])
+    elif isinstance(got, (list, tuple)):
+        if len(got) == 2 and all(isinstance(x, (list, tuple)) for x in got):
+            written, over = list(got[0]), list(got[1])
+        else:
+            over = list(got)
+    text = "lineup %s saved." % name
+    if written:
+        text += " Written: %s." % ", ".join(map(str, written))
+    text += (" Overwritten: %s." % ", ".join(map(str, over))) if over else " Nothing was overwritten."
+    return text + " Switch to it with /crew-lineup use %s." % name
+
+
+def _lineup_overview(lu):
+    state = _lineup_state(lu)
+    active = state.get("active") or DEFAULT_LINEUP
+    status = state.get("status") or "ready"
+    lines = ["crew lineup: %s (%s)" % (active, status)]
+    if status == "failed" and state.get("error"):
+        lines.append("error: %s" % state.get("error"))
+    if status == "building" and state.get("roles"):
+        lines.append("being set up: %s" % ", ".join(map(str, state.get("roles"))))
+    tool = _card_tool()
+    if tool is not None:
+        try:
+            writers = set(tool.writer_roles())
+            lines.append("writer roles: %s" % _role_line(
+                [r for r in tool.role_entries() if str(r.get("name") or "").lower() in writers]
+                or [{"name": w} for w in writers]))
+        except Exception:  # noqa: BLE001
+            pass
+    avail = ["default (shipped): worker, content"]
+    try:
+        for item in lu.list_lineups() or []:
+            roles = ", ".join(str(r.get("name") if isinstance(r, dict) else r) for r in item.get("roles") or [])
+            desc = (" - %s" % item["description"]) if item.get("description") else ""
+            avail.append("%s (%s)%s: %s" % (item.get("name"), item.get("source") or "?", desc, roles))
+    except Exception as exc:  # noqa: BLE001
+        avail.append("(could not list lineups: %s)" % exc)
+    lines.append("available:\n  " + "\n  ".join(avail))
+    lines.append("/crew-lineup use NAME | default | show NAME | add <url|path> | save NAME")
+    return "\n".join(lines)
+
+
 def _intake_facts():
     """The facts the intake would otherwise dig for (2026-10-03: a /crew turn spent ~8 tool calls grepping
     crew_card.py for the budget and running the safety command): each writer role's default budget and the
@@ -1409,13 +1761,18 @@ def _intake_facts():
     if tool is None:
         return ""
     try:
-        budgets = ", ".join("%s %d" % (r, tool.default_budget(r)) for r in ("worker", "content"))
+        try:
+            writers = tuple(tool.writer_roles())
+        except Exception:  # noqa: BLE001 - an older or fake card tool: the shipped writers
+            writers = ("worker", "content")
+        budgets = ", ".join("%s %d" % (r, tool.default_budget(r)) for r in writers)
         mode = tool.crew_safety.permanent_mode()
     except Exception:  # noqa: BLE001 - no facts is the old behaviour, never a broken /crew turn
         return ""
-    facts = ("<crew-facts>\nBudget defaults (tokens): %s. Write the role's number on the Budget line; the plugin "
+    roles = _lineup_facts(tool)
+    facts = ("<crew-facts>\n%sBudget defaults (tokens): %s. Write the role's number on the Budget line; the plugin "
              "raises it to the floor itself.\nProof safety mode: %s. Do not read "
-             "crew's files for these values.\n</crew-facts>" % (budgets, mode))
+             "crew's files for these values.\n</crew-facts>" % (roles + "\n" if roles else "", budgets, mode))
     lessons = _lessons_block()
     return facts + "\n" + lessons if lessons else facts
 
@@ -1566,20 +1923,23 @@ def crew_intake_preload(user_message=None, session_id=None, turn_id=None, platfo
     if CREW_SKILL_INVOKED_RX.match(user_message.lstrip()[:200]):
         _record_crew_turn(session_id, turn_id)
         _open_window(session_id)
-        _record_brief(session_id, _expanded_ask(user_message))
+        lineup, ask = _split_lineup(_expanded_ask(user_message))
+        _record_brief(session_id, ask)
+        note = _lineup_context(lineup) if lineup is not None else ""
         facts = _intake_facts()
-        return {"context": _banner_open(platform) + facts}
+        return {"context": _banner_open(platform) + note + facts}
     m = CREW_SLASH_RX.match(user_message)
     if not m:
         return None
     _record_crew_turn(session_id, turn_id)
     _open_window(session_id)
-    _record_brief(session_id, (m.group(1) or "").strip())
+    lineup, ask = _split_lineup(m.group(1) or "")
+    _record_brief(session_id, ask)
+    note = _lineup_context(lineup) if lineup is not None else ""
     body = _crew_skill_text()
     if body is None:
         return None
-    ask = (m.group(1) or "").strip()
-    return {"context": _banner_open(platform) + (
+    return {"context": _banner_open(platform) + note + (
         "The `crew` skill is already loaded; its full text follows. Do not call skill_view or "
         "skills_list for it. The owner's ask is: \"%s\". Apply Rule 1 first: if the ask names no "
         "target and no measurable end state, ask through the clarify tool - one batch, no research "

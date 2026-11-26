@@ -107,7 +107,7 @@ def main():
     # 2. every role that worked is visible. A card whose only work was its verification shows the
     # verifier and no writer - that is the shape of a verification card, not a missing node.
     roles = {n.get("role") for n in nodes}
-    worked = roles & {"worker", "content", "verifier"}
+    worked = roles & (set(crew_card.writer_roles()) | {"verifier"})
     if any(n.get("kind") in ("run", "session", "verdict", "verifier") for n in nodes):
         check("a role that worked is visible", bool(worked),
               "roles=%s" % sorted(r for r in roles if r))

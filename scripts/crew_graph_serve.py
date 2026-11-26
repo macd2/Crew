@@ -181,7 +181,7 @@ def board_data(include_all=False, older=False):
         my_runs = runs.get(tid, [])
         live = [r for r in my_runs if r[3] == "running" and run_is_live(r, now)]
         profile = (live[0][2] if live else assignee) or ""
-        role = CG.card_role(body or "", skills) or CG.profile_role(profile, "worker")
+        role = CG.card_role(body or "", skills) or CG.profile_role(profile, CG.crew_card.default_writer())
         if live:
             beat = live[0][6] or live[0][4]
             active = {"profile": profile, "run": live[0][0],

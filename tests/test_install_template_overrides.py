@@ -71,9 +71,9 @@ class OverrideTests(unittest.TestCase):
         CI.h = cfg
         self.addCleanup(setattr, CI, "h", saved)
         cfg.seed("p", model__default="shipped-model")
-        self.assertIn("model.default", CI._apply_settings("p", self.conf))
+        self.assertIn("model.default", CI._apply_settings("p", self.conf)[0])
         self.assertEqual("my-model", CI._cfg("p", "model.default"))
-        self.assertEqual([], CI._apply_settings("p", self.conf), "applying twice must change nothing")
+        self.assertEqual([], CI._apply_settings("p", self.conf)[0], "applying twice must change nothing")
         self.assertEqual([], CI.settings_problems("p", "worker", self.tpl))
 
     def check_with(self, **seed):
@@ -120,8 +120,8 @@ class OverrideTests(unittest.TestCase):
         self.override("settings.conf", 'fallback_providers = [{"provider":"litellm","model":"reason"}]\n')
         self.check_with(crew__role="worker", model__default="shipped-model", agent__max_turns="150",
                         fallback_providers="[]")
-        self.assertIn("fallback_providers", CI._apply_settings("p", self.conf))
-        self.assertEqual([], CI._apply_settings("p", self.conf), "applying twice must change nothing")
+        self.assertIn("fallback_providers", CI._apply_settings("p", self.conf)[0])
+        self.assertEqual([], CI._apply_settings("p", self.conf)[0], "applying twice must change nothing")
         self.assertEqual([], CI.settings_problems("p", "worker", self.tpl))
 
     def test_a_different_fallback_mapping_is_still_reported(self):

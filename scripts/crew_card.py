@@ -6,7 +6,7 @@ crew-verifier profile. The contract gate lives here, not only in a prompt: a car
 unless it carries a goal, the artifact, where it lands, who it is for, "Done when:", a proof
 command the verifier can run and a token budget.
 
-  crew_card.py open   --title T --goal G --role worker|content --artifact A --lands L
+  crew_card.py open   --title T --goal G --role <writer role> --artifact A --lands L
                       --audience W --done-when D --proof-cmd C [--budget N] [--constraints X]
                       [--parent ID ...] [--max-runtime 60m] [--dry-run] [--json]
   crew_card.py plan   --spec plan.json [--dry-run] [--json]
@@ -38,7 +38,11 @@ if HERE_SCRIPTS not in sys.path:
     sys.path.insert(0, HERE_SCRIPTS)
 import crew_safety  # noqa: E402 - the one runner of a proof command, and the mode it runs in
 
-WRITER_ROLES = ("worker", "content")
+# Roles are data (roles.json `kind`): exactly one coordinator and one verifier, the core every crew has, plus
+# the writer roles of the installed lineup. DEFAULT_WRITERS is the shipped crew, used when roles.json says nothing.
+CORE_ROLES = ("coordinator", "verifier")
+DEFAULT_WRITERS = ("worker", "content")
+WRITER_ROLES = DEFAULT_WRITERS   # kept for old importers; read writer_roles() instead
 DEFAULT_PREFIX = "crew-"
 DEFAULT_BUDGET = 1000000
 BUDGET_FLOOR = 120000   # used when roles.json carries no budget_floor_tokens
@@ -295,6 +299,45 @@ def roles_defaults():
         except Exception:
             continue
     return {}
+
+
+def _role_kind(r):
+    """A roles.json entry's kind: its `kind`, else coordinator/verifier by name, else writer (pre-kind files)."""
+    kind = str(r.get("kind") or "").strip().lower()
+    if kind in ("coordinator", "verifier", "writer"):
+        return kind
+    name = str(r.get("name") or "").strip().lower()
+    return name if name in CORE_ROLES else "writer"
+
+
+def role_entries():
+    """[roles.json role dicts] with a name, in file order."""
+    roles = roles_defaults().get("roles")
+    return [r for r in roles if isinstance(r, dict) and str(r.get("name") or "").strip()] \
+        if isinstance(roles, list) else []
+
+
+def writer_roles():
+    """The writer role names of the installed crew (roles.json kind=writer), in file order; the shipped
+    worker/content when roles.json has none."""
+    names = tuple(str(r["name"]).strip().lower() for r in role_entries() if _role_kind(r) == "writer")
+    return names or DEFAULT_WRITERS
+
+
+def all_roles():
+    """Every role of the installed crew: coordinator, the writers, verifier."""
+    return ("coordinator",) + writer_roles() + ("verifier",)
+
+
+def role_entry(role):
+    """The roles.json dict for one role name, or {}."""
+    want = (role or "").strip().lower()
+    return next((r for r in role_entries() if str(r["name"]).strip().lower() == want), {})
+
+
+def default_writer():
+    """The writer a card falls back to when its role is unknown: the first writer of the crew."""
+    return writer_roles()[0]
 
 
 def budget_floor():
@@ -631,8 +674,9 @@ def contract_gaps(c, allow_no_proof=False):
             continue
         if not str(c.get(key) or "").strip():
             gaps.append(label)
-    if str(c.get("role") or "").strip().lower() not in WRITER_ROLES:
-        gaps.append("role (worker or content)")
+    writers = writer_roles()
+    if str(c.get("role") or "").strip().lower() not in writers:
+        gaps.append("role (%s)" % " or ".join(writers))
     if str(c.get("verify") or "").strip().lower() not in ("",) + VERIFY_MODES + (CLOSEOUT_MODE,):
         gaps.append("Verify (proof or independent)")
     if len(str(c.get("inputs") or "")) > INPUTS_MAX:
@@ -948,8 +992,13 @@ ROLE_TASK_CLASS = {"worker": "code", "content": "write", "verifier": "review"}
 
 def role_task_class(role):
     """The task class the router is told for a card: what its role does, not how short its title is.
-    A wall used to ask for "short" on every card, which is how a 205-call card got a short-answer model."""
-    return ROLE_TASK_CLASS.get((role or "").strip().lower(), "code")
+    A wall used to ask for "short" on every card, which is how a 205-call card got a short-answer model.
+    roles.json `task_class` wins; the shipped map, then "code", are the fallbacks."""
+    name = (role or "").strip().lower()
+    tc = str(role_entry(name).get("task_class") or "").strip().lower()
+    if tc in ("code", "write", "review"):
+        return tc
+    return ROLE_TASK_CLASS.get(name, "code")
 
 
 def route_answer(task_class="code", label="", profile=None):
@@ -1868,9 +1917,10 @@ def closer_profiles(body=""):
         return {profile_prefix() + "verifier", role_profile("verifier")} | coord
     if mode == "proof":
         role = (field(body, "Role") or "").strip().lower()
-        writers = [role] if role in WRITER_ROLES else list(WRITER_ROLES)
+        crew_writers = writer_roles()
+        writers = [role] if role in crew_writers else list(crew_writers)
         return {profile_prefix() + r for r in writers} | {role_profile(r) for r in writers} | coord
-    roles = ("worker", "content", "verifier", "coordinator")
+    roles = all_roles()
     return {profile_prefix() + r for r in roles} | {role_profile(r) for r in roles}
 
 
@@ -2363,14 +2413,14 @@ def hand_to_writer(card_id):
     The kernel resumes a card whose block came from a review run in `review` (unblock_task), i.e. straight back to
     the verifier with nothing changed (t_3f619c1d, run 8). `reopen_review_task` sends it to `ready` for the
     implementer; a card still assigned to the verifier (an implementer recorded wrongly) is given to the card's
-    writer profile (its `Role:` line, else the worker). Returns {"reopened", "assigned"}."""
+    writer profile (its `Role:` line, else the first writer). Returns {"reopened", "assigned"}."""
     out = {"reopened": False, "assigned": ""}
     row = card_row(card_id)
     if not row or verify_mode(row[4]) != "independent":
         return out
     judges = {profile_prefix() + "verifier", role_profile("verifier")}
     role = (field(row[4], "Role") or "").strip().lower()
-    writer = role_profile(role if role in WRITER_ROLES else "worker")
+    writer = role_profile(role if role in writer_roles() else default_writer())
     if row[2] != "review" and not (row[2] in ("ready", "todo") and row[3] in judges):
         return out                    # nothing to hand back: the writer is already next
     kb, conn = kb_conn()
@@ -2769,7 +2819,7 @@ def main():
                                                       "(Hermes Desktop renders chat as markdown)")
     le = sub.add_parser("lesson", help="record a lesson for a role (crew_lessons.py): the plugin adds it to that "
                                        "role's later turns; use this, never edit a skill")
-    le.add_argument("--role", required=True, help="worker, content, verifier, coordinator or all (comma list)")
+    le.add_argument("--role", required=True, help="a crew role (%s) or all (comma list)" % ", ".join(all_roles()))
     le.add_argument("--text", required=True, help="one or two lines")
     args = ap.parse_args()
 

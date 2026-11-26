@@ -18,6 +18,12 @@ Each directory holds:
                     `skills_extra = [category/skill, ...]` is read by the installer, not written to
                     config.yaml: skills (paths under the installing profile's skills dir) the role
                     keeps besides skills/crew/, which is all a role profile's skills dir holds.
+                    `inherit.env`, `inherit.hooks`, `inherit.skills`, `inherit.mcp` are read by the
+                    installer too: what the bare role profile takes from which profile (a profile
+                    name, `owner` or `false`; skills and mcp also `[name, profile/name]` or
+                    `{"from": ..., "add": [...], "drop": [...]}` as JSON). The shipped roles say
+                    env and hooks from the owner, no extra skills, no MCP servers; a lineup's
+                    `inherit` block writes the same lines (crew-home/lineups/README.md).
 
 Edit a template, then run the installer:
 
@@ -56,3 +62,11 @@ Then run the installer as above. `--check` compares the profiles with the same m
 Profile names default to `<prefix><role>`: `crew-worker`, `crew-verifier`, and so on. A card is
 assigned to its role's profile by scripts/crew_card.py, and falls back to the installing profile
 when that role profile does not exist.
+
+## Lineup roles
+
+A lineup (see [../crew-home/lineups/README.md](../crew-home/lineups/README.md)) has no directory here: the installer generates each
+lineup role's `SOUL.md` and `settings.conf` from the lineup (the settings start from `worker/settings.conf`;
+the generic texts for a role without its own are in `lineup/`). Owner overrides still apply the same way:
+`<Hermes home>/crew/templates/<role>/` (for example `~/.hermes/crew/templates/auditor/`) wins over the
+generated values with the same owner-key rules as above.

@@ -1,7 +1,7 @@
 ---
 name: crew
 description: "Crew intake: /crew <ask> - the coordinator checks the ask critically, asks what is missing, then opens one contract card and hands it over."
-version: 0.10.10
+version: 0.11.0
 ---
 
 # /crew - coordinator intake
@@ -72,7 +72,7 @@ Crew's own values (budgets, the proof safety mode) are in the `<crew-facts>` blo
 | Inputs | paths, URLs or short quoted text the owner gave (specs, docs, examples); optional | the owner (section 3b); leave the line out when there are none |
 | Constraints | what must not change, off-limit tools or data, deadline | you fill "none stated" unless the ask or a risk you see needs the owner |
 | Budget | tokens for the card | you fill the role's default from the `<crew-facts>` block |
-| Role | worker (code, config, infra, web) or content (posts, reports, video, pages, social) | you fill |
+| Role | one of the writer roles listed in `<crew-facts>` (default crew: worker for code, config, infra, web; content for posts, reports, video, pages, social) | you fill |
 | Verify | `proof` or `independent` | you fill `proof` for a command-only proof that covers every clause of Done when, `independent` for a script proof (the plugin sets it anyway) |
 | Route | `auto`, `<model>/<provider>`, or `none` | you fill `auto` |
 
@@ -126,8 +126,8 @@ goal, artifact, lands at, for, done when, proof, budget, route), then the safety
 `kanban_create` in the same turn:
 
 ```
-kanban_create(title="<short>", assignee="crew-worker", skills=["crew-role-worker"], body="""
-Role: worker
+kanban_create(title="<short>", assignee="crew-<role>", skills=["crew-role-<role>"], body="""
+Role: <role>
 Budget: 500000
 Route: auto
 Verify: proof
@@ -250,7 +250,7 @@ instead (at most 6 children, never two writers on one artifact; the tool refuses
 - Dispatch, retry or unblock anything, or wait on anything but the watcher, once the card is open: the coordinator loop owns a card
   that blocks or fails (mechanical fixes, then one decision; the owner is asked only when it needs them).
 - Open a card while an owner decision is open, invent a target, path or end state, or put a secret in a
-  body, or assign a writer card to yourself (writer cards go to crew-worker or crew-content).
+  body, or assign a writer card to yourself (writer cards go to `crew-<role>` for a writer role in `<crew-facts>`).
 - Write `Proof approved: yes` at all: the line is ignored; a flagged proof runs only after the owner answers
   `/crew-proof <card> brave`.
 - Write `Proof mode: brave` the owner did not choose, or skip the safety question while the safety mode

@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.10.10-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.11.0-3fb950?style=flat-square)](plugin.yaml)
 [![tests](https://github.com/macd2/Crew/actions/workflows/tests.yml/badge.svg)](https://github.com/macd2/Crew/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -33,6 +33,25 @@ hands the card to a **coordinator** that owns it until the proof command exits 0
 result back in the same chat, or one concrete question when it truly needs you.
 
 [![The crew dashboard: a card's graph with its running worker selected and the live transcript](assets/dashboard.webp)](https://crew.forgecoreai.com)
+
+## What's new in 0.11.0
+
+- **Lineups: a specialised crew from one JSON file.** A lineup names the crew's writer roles (the coordinator and
+  the verifier always stay), and each role becomes its own profile with its soul, brief and skill.
+  `install.py --lineup security`, `/crew --lineup NAME <ask>` or `/crew-lineup use NAME` sets one up;
+  `/crew-lineup show | default | add <url|path> | save` manages them. Three ship as examples in
+  `crew-home/lineups/`: `security`, `design` and `pentest`; the format is in `crew-home/lineups/README.md`.
+- **Uninstall a lineup.** `install.py --uninstall-lineup NAME` or `/crew-lineup uninstall NAME --yes` removes its role
+  profiles and build folder and puts the default crew back. The lineup file stays, so it installs again in one
+  command. Refused while a card for one of its roles is still open.
+- **Lineups say what each role inherits.** An optional `inherit` block, for the whole lineup or per role, names the
+  profile a role takes its credentials, shell hooks, skills and MCP servers from. Skills and MCP servers also take
+  an exact list (`["seo-search", "other-profile/github"]`) or a profile's set with additions and removals
+  (`{"from": "owner", "add": [...], "drop": [...]}`); a name that does not exist is refused before anything
+  changes. Role profiles now start bare and get only that; the default keeps credentials and hooks from the owner
+  and adds no extra skills or MCP servers.
+- **Tested on Windows against Hermes 0.23.4.** The Windows walk accepts the Python a current Hermes ships on its own
+  terminal PATH.
 
 ## What's new in 0.10.10
 
@@ -189,9 +208,10 @@ whether to open that profile's Hermes so Hermes itself asks you.
 By default:
 
 - **Role profiles.** Creates `crew-coordinator`, `crew-worker`, `crew-content` and `crew-verifier` with
-  `hermes profile create --clone-from NAME`. Hermes has no partial clone, so each role profile gets a copy of
-  your profile's `config.yaml` (including its `hooks:`), its whole `.env` (provider keys), `SOUL.md`, skills
-  and memories (`MEMORY.md`, `USER.md`); Hermes strips the messaging channels. Then, in each role profile:
+  `hermes profile create NAME --no-skills`: bare, nothing of your profile is cloned. Each role profile then
+  gets exactly what its `inherit.*` lines say (see [crew-home/lineups/README.md](crew-home/lineups/README.md)):
+  by default your `.env` and credential sections (`secrets`, `vault`, `providers`) and your `hooks:` section,
+  no MCP servers and no skills but crew's. Then, in each role profile:
   - sets the keys from `templates/profiles/<role>/settings.conf` with `hermes config set`. Models are
     Anthropic's, and `model.base_url` is pinned to `https://api.anthropic.com`: to use your own, put the
     keys you change in `<Hermes home>/crew/templates/<role>/settings.conf`, which an update never touches
@@ -302,6 +322,7 @@ at once. The **Hermes web UI** dashboard tab runs the same app too.
 | `/crew-safety [brave\|safe]` | Show or set how careful unattended proof commands are (see below). No model call. |
 | `/crew-proof <card> <yes\|brave>` | Answer a card's proof question: `yes` accepts a proposed proof command, `brave` runs a blocked one. No model call. |
 | `/crew-diagnose [state]` | Read-only: every card in that state, why it is there and how it would resume. |
+| `/crew-lineup [use\|show\|add\|save\|default]` | Show or switch the crew's writer roles (see [Lineups](#lineups-specialised-crews)). No model call. |
 
 Or paste this into an agent and let it set crew up for you:
 
@@ -310,6 +331,24 @@ Set up Hermes.Crew for my Hermes profile NAME: from the Hermes.Crew package run 
 then hermes -p NAME plugins doctor crew and fix anything it reports. Finish by sending /crew-status in my chat
 and tell me what it answered.
 ```
+
+## Lineups: specialised crews
+
+The default crew has two writers, `worker` and `content`. A **lineup** swaps them for roles of your own,
+defined in one JSON file; the coordinator and the verifier always stay. The package ships one example,
+`security`: an `auditor` that finds vulnerabilities and never fixes them, a `remediator` that fixes them with a
+regression test each, and a `hardener` for config and dependencies.
+
+```
+/crew --lineup security audit the upload endpoint and fix what you find
+```
+
+The lineup is set up in the background (one Hermes profile per role) while the intake runs. `/crew-lineup`
+shows the active lineup and the ones you can use; `/crew-lineup add <url|path>` shows everything in a lineup
+before `/crew-lineup save NAME` keeps it; `python3 install.py --profile NAME --lineup security` does the same
+from the installer. Crew ships three: `security`, `design` and `pentest`. Your own lineups live in
+`<Hermes home>/crew/lineups/`. A lineup's roles run with the same
+access as any Hermes profile, so only use lineups you trust. The format is in [crew-home/lineups/README.md](crew-home/lineups/README.md).
 
 ## The roles' tools
 

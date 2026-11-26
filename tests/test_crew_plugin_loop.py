@@ -194,7 +194,7 @@ class CommandTableTests(unittest.TestCase):
         tool.unstuck_card.assert_called_once_with("t_1")
 
     def test_the_options_that_stay_are_the_documented_ones(self):
-        self.assertEqual(["status", "graph", "stop", "unstuck", "safety", "proof"],
+        self.assertEqual(["status", "graph", "stop", "unstuck", "safety", "proof", "lineup"],
                          [a for _n, a, _h, _d in P.COMMANDS])
 
     def test_the_platform_menu_is_the_skills_around_the_plugin_commands(self):

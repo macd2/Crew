@@ -4,7 +4,7 @@
 Usage:
   python3 install.py [--profile NAME] [--check] [--no-service] [--no-cron] [--no-profiles]
                      [--nightly-proofs [--proofs-deliver TARGET]]
-                     [--chat-kanban] [--telegram-menu] [--spill-cap]
+                     [--chat-kanban] [--telegram-menu] [--spill-cap] [--lineup NAME|PATH]
 
 The installer asks only when a shell hook needs the owner's consent, and then only whether to open Hermes's own
 hook prompt for that profile (see the shell-hook consent section). What it does by default: copies the plugin (scripts included) into the
@@ -131,17 +131,18 @@ RETIRED_SCRIPT_FILES = ["crew_follow.py", "crew_follow_proof.py", "crew_observer
 # The plugin copy in a profile is the package's plugin files plus its scripts/: everything crew runs is
 # loaded from <profile>/plugins/crew/ and never from <profile>/scripts/. `hermes plugins install` clones the
 # whole repo into the same place, so the layout is the same in both install modes.
+# The crew-role-<writer> skills are not in the literal list: they follow the writer roles of the roles.json in force
+# (the package's for the shipped crew, a lineup's overlay otherwise; see _use_roles), inserted after crew-verifier.
 PLUGIN_FILES = (["plugin.yaml", "__init__.py", "skills/crew-verifier/SKILL.md",
-                 "skills/crew-role-worker/SKILL.md", "skills/crew-role-content/SKILL.md",
                  "skills/crew/SKILL.md", "skills/crew-diagnose/SKILL.md",
                  "dashboard/manifest.json", "dashboard/dist/index.js", "dashboard/plugin_api.py",
                  "desktop/plugin.js"]
                 + ["scripts/" + rel for rel in SCRIPT_FILES])
+_PLUGIN_BASE_FILES = list(PLUGIN_FILES)
 # Files the plugin copy once held and the package has since deleted: their presence makes the copy stale.
 PLUGIN_RETIRED_FILES = ["scripts/crew_proofs.sh"] + ["scripts/" + r for r in RETIRED_SCRIPT_FILES
                                                     if r.startswith("crew_dashboard/")]
-ROLE_FILES = ["roles.json", "briefs/coordinator.md", "briefs/worker.md", "briefs/content.md",
-              "briefs/verifier.md"]
+ROLE_FILES = []        # "roles.json" + every role's brief, derived from the roles.json in force (_use_roles)
 
 
 def hermes_bin():
@@ -239,6 +240,54 @@ def _cfg_raw_many(profile, keys):
     return {k: cache[k] for k in keys}
 
 
+# Whole config.yaml sections (hooks, mcp_servers, the credential sections) as they are written in the file, not merged
+# with Hermes's defaults: what a profile declares is what another profile inherits. Read with Hermes's python (it has
+# yaml), else this one.
+_SECTION_READER = r"""
+import json, sys, yaml
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+except FileNotFoundError:
+    data = {}
+print(json.dumps({k: data.get(k) for k in json.loads(sys.argv[2])} if isinstance(data, dict) else {}, default=str))
+"""
+
+
+def _sections(profile, keys):
+    """{key: value or None} of whole top-level config.yaml sections of a profile. A replaced runner (a test's fake)
+    answers through `config get`, which then prints the section as JSON."""
+    keys = list(keys)
+    if h is not _REAL_H:
+        out = {}
+        for k in keys:
+            r = h(profile, "config", "get", k)
+            try:
+                out[k] = json.loads(r.stdout) if r.returncode == 0 and (r.stdout or "").strip() else None
+            except ValueError:
+                out[k] = None
+        return out
+    py = _hermes_python()[0] or sys.executable
+    r = subprocess.run([py, "-c", _SECTION_READER, os.path.join(resolve_profile_home(profile), "config.yaml"),
+                        json.dumps(keys)], capture_output=True, text=True, timeout=60, encoding="utf-8",
+                       errors="replace")
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise RuntimeError("cannot read %s of profile %s: %s" % (", ".join(keys), profile or "default",
+                                                                  (r.stderr or r.stdout or "?").strip()[-300:]))
+
+
+def _set_failed(r):
+    return ((r.stderr or r.stdout or "").strip().splitlines() or ["?"])[-1]
+
+
+def _section_set(profile, key, value):
+    """Replace a whole config.yaml section with Hermes's own writer. --force: without it Hermes refuses a value over an
+    existing section of another shape (a list over the mapping mcp_servers) and the old section silently stays."""
+    return h(profile, "config", "set", "--force", key, json.dumps(value))
+
+
 def _read(path):
     try:
         return Path(path).read_bytes()
@@ -265,7 +314,7 @@ def step_plugin(profile_home, apply):
     dst = os.path.join(profile_home, "plugins", "crew")
     if os.path.realpath(dst) == os.path.realpath(SRC_DIR):
         return "OK", "plugin crew (this checkout is the plugin dir: `hermes plugins install` mode)"
-    if (os.path.isdir(dst) and _tree_ok(SRC_DIR, dst, PLUGIN_FILES)
+    if (os.path.isdir(dst) and _plugin_ok(dst)
             and not any(os.path.lexists(os.path.join(dst, r)) for r in PLUGIN_RETIRED_FILES)):
         return "OK", "plugin crew (up to date)"
     if not apply:
@@ -277,7 +326,7 @@ def step_plugin(profile_home, apply):
     for rel in PLUGIN_FILES:
         d = os.path.join(dst, rel)
         os.makedirs(os.path.dirname(d), exist_ok=True)
-        shutil.copy2(os.path.join(SRC_DIR, rel), d)
+        shutil.copy2(_src(rel), d)
     return "CHANGED", "plugin crew copied into %s" % dst
 
 
@@ -338,7 +387,7 @@ def step_scripts(profile_home, apply):
 
 
 def step_roles(profile_home, apply):
-    src = os.path.join(SRC_DIR, "roles")
+    src = _roles_dir()
     dst = os.path.join(profile_home, "roles", "crew")
     if os.path.isdir(dst) and _tree_ok(src, dst, ROLE_FILES):
         return "OK", "roles (up to date)"
@@ -363,6 +412,83 @@ def step_crew_dirs(profile_home, apply):
     for d in need:
         os.makedirs(d, exist_ok=True)
     return "CHANGED", "created " + ", ".join(need)
+
+
+# ---------------------------------------------------------------- shipped lineups
+# The lineups crew ships live in crew-home/lineups/, a mirror of <crew folder>/lineups/: the installer copies each one
+# there, the place a downloaded or hand-written lineup lands, so the owner reads and edits them like their own. A copy
+# the owner changed is never overwritten; one still equal to what an earlier install shipped follows the package.
+SHIPPED_LINEUPS_RECORD = "lineups-shipped.json"    # in <crew folder>: {file name: sha256 of the copy crew wrote}
+
+
+def _file_sha(path):
+    import hashlib
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def step_lineups(apply):
+    """Copy the package's crew-home/lineups/*.json into <crew folder>/lineups/: missing ones are added, unedited ones
+    updated, edited ones kept and reported."""
+    src_dir = SRC_DIR / "crew-home" / "lineups"
+    names = sorted(p.name for p in src_dir.glob("*.json")) if src_dir.is_dir() else []
+    if not names:
+        return "OK", "no shipped lineups"
+    try:
+        crew = _crew_lineup().crew_dir()
+    except Exception as exc:  # noqa: BLE001 - the crew folder is crew_lineup's to name; without it nothing is copied
+        return "FAILED", "shipped lineups: crew folder unknown (%s)" % exc
+    dst_dir = os.path.join(crew, "lineups")
+    rec_path = os.path.join(crew, SHIPPED_LINEUPS_RECORD)
+    try:
+        with open(rec_path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        rec = rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError):
+        rec = {}
+    todo, kept = [], []
+    for name in names:
+        src, dst = str(src_dir / name), os.path.join(dst_dir, name)
+        want = _file_sha(src)
+        if not os.path.isfile(dst):
+            todo.append((name, src, dst, want, "add"))
+            continue
+        have = _file_sha(dst)
+        if have == want:
+            if rec.get(name) != want:
+                todo.append((name, src, dst, want, "record"))
+        elif have == rec.get(name):
+            todo.append((name, src, dst, want, "update"))
+        else:
+            kept.append(name[:-5])
+    note = ("; kept your edit of " + ", ".join(kept)) if kept else ""
+    if not [t for t in todo if t[4] != "record"]:
+        if todo and apply:
+            for name, _s, _d, want, _a in todo:
+                rec[name] = want
+            _write_json(rec_path, rec)
+        return "OK", "shipped lineups in %s (%s)%s" % (dst_dir, ", ".join(n[:-5] for n in names), note)
+    changes = ["%s %s" % (a, n[:-5]) for n, _s, _d, _w, a in todo if a != "record"]
+    if not apply:
+        return "CHANGED", "shipped lineups -> %s in %s%s" % (", ".join(changes), dst_dir, note)
+    os.makedirs(dst_dir, exist_ok=True)
+    for name, src, dst, want, action in todo:
+        if action != "record":
+            tmp = dst + ".tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+        rec[name] = want
+    _write_json(rec_path, rec)
+    return "CHANGED", "shipped lineups: %s in %s%s" % (", ".join(changes), dst_dir, note)
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
 
 
 OWNER_RECORD = os.path.join(crew_card.default_home(), "crew", "owner.json")
@@ -529,9 +655,14 @@ def _cfg_many(profile, keys):
 def step_config(profile_home, profile, apply):
     roles_path = os.path.join(profile_home, "roles", "crew", "roles.json")
     expected = {"crew.roles_path": roles_path, "crew.source_dir": str(SRC_DIR)}
+    # crew.lineup: the lineup in force, so a re-run or an update keeps it. The shipped crew needs no record; one is
+    # only written to replace an earlier lineup's.
+    have_lineup = _config_get(profile, "crew.lineup")
+    if LINEUP_RECORD != "default" or (have_lineup and have_lineup != "default"):
+        expected["crew.lineup"] = LINEUP_RECORD
     missing = [(k, v) for k, v in expected.items() if _config_get(profile, k) != v]
     if not missing:
-        return "OK", "config crew.roles_path + crew.source_dir"
+        return "OK", "config " + " + ".join(expected)
     if not apply:
         return "CHANGED", "config set " + ", ".join(k for k, _ in missing)
     for key, val in missing:
@@ -604,7 +735,8 @@ def step_spill_cap(profile, apply, enabled):
 # core-commands-first with the crew options sorted alphabetically, so /crew (a skill command, tier 2) sits
 # under the built-ins. The order here is importance: the intake, then the options typed every day, then the
 # recovery passes, then the install.
-CREW_MENU_ORDER = ["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-proof", "crew-diagnose"]
+CREW_MENU_ORDER = ["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-proof", "crew-lineup",
+                   "crew-diagnose"]
 
 
 def _menu_names(raw):
@@ -782,8 +914,18 @@ def _conf_value(val):
     return val.replace("{prefix}", PROFILE_PREFIX)
 
 
-# Lines in settings.conf that steer the installer and are NOT config.yaml keys.
+# Lines in settings.conf that steer the installer and are NOT config.yaml keys: the extra skills, and what the role
+# profile inherits from which profile (inherit.env / .hooks / .skills / .mcp, see _inherit).
 INSTALLER_KEYS = ("skills_extra",)
+INHERIT_KEYS = ("env", "hooks", "skills", "mcp")
+INHERIT_DEFAULTS = {"env": "owner", "hooks": "owner", "skills": False, "mcp": False}
+# The config.yaml sections that carry a profile's credentials besides its .env: the secrets provider (keys resolved at
+# launch), the vault bridge and the custom provider endpoints. inherit.env takes them with the .env.
+ENV_SECTIONS = ("secrets", "vault", "providers")
+
+
+def _installer_key(key):
+    return key in INSTALLER_KEYS or key.startswith("inherit.")
 
 
 # The owner's own template files, kept outside the package so an update never touches them:
@@ -866,7 +1008,7 @@ def _read_conf_lines(conf_path):
 
 def _conf_entries(conf_path):
     """The config.yaml keys of a settings.conf: every line except the installer's own directives."""
-    return [(k, v) for k, v in _conf_lines(conf_path) if k not in INSTALLER_KEYS]
+    return [(k, v) for k, v in _conf_lines(conf_path) if not _installer_key(k)]
 
 
 def _conf_list(conf_path, key):
@@ -875,6 +1017,30 @@ def _conf_list(conf_path, key):
         if k == key:
             return [x.strip() for x in v.strip("[]").split(",") if x.strip()]
     return []
+
+
+def _inherit(tpl):
+    """({env, hooks, skills, mcp}, [problems]) of a role's settings.conf inherit.* lines, the defaults for a key it does
+    not name. Parsed and checked by crew_lineup (conf_inherit), the same rules as a lineup's inherit block: False or a
+    profile name ("owner" = the installing profile); skills and mcp also a list or {"from", "add", "drop"}."""
+    return _crew_lineup().conf_inherit(_conf_lines(os.path.join(tpl, "settings.conf")),
+                                       lambda p: os.path.isdir(resolve_profile_home(p)),
+                                       "settings.conf of %s" % os.path.basename(tpl))
+
+
+def _owner_sources(source_profile, source_home=None):
+    """crew_lineup's profile lookups (resolve_set, load) with "owner" = the profile crew is installed from."""
+    def real(p):
+        return source_profile if p == "owner" else p
+
+    def home_of(p):
+        return source_home if (p == "owner" and source_home) else resolve_profile_home(real(p))
+
+    def servers_of(p):
+        if not os.path.isdir(home_of(p)):
+            return {}
+        return _sections(real(p), ["mcp_servers"])["mcp_servers"]
+    return {"home_of": home_of, "servers_of": servers_of}
 
 
 def settings_problems(profile, role, tpl):
@@ -1241,19 +1407,25 @@ def step_proofs_cron(profile, profile_home, apply, no_cron, nightly=False, deliv
 
 
 def skill_names():
-    """Every skill the package ships (a directory under skills/ holding a SKILL.md)."""
+    """Every skill the package ships (a directory under skills/ holding a SKILL.md); with a lineup in force its
+    crew-role-* skills come from the overlay instead of the package's."""
     src = os.path.join(SRC_DIR, "skills")
-    return sorted(d for d in os.listdir(src) if os.path.isfile(os.path.join(src, d, "SKILL.md")))
+    names = [d for d in os.listdir(src) if os.path.isfile(os.path.join(src, d, "SKILL.md"))]
+    if LINEUP_DIR:
+        over = os.path.join(LINEUP_DIR, "skills")
+        names = [d for d in names if not d.startswith("crew-role-")]
+        names += [d for d in (os.listdir(over) if os.path.isdir(over) else [])
+                  if d.startswith("crew-role-") and os.path.isfile(os.path.join(over, d, "SKILL.md"))]
+    return sorted(set(names))
 
 
 def step_skills(profile_home, apply):
     """Install every skill the package ships into <profile>/skills/crew/<name>/, so the
     role skills resolve on a fresh install with no shared skills folder configured."""
-    src = os.path.join(SRC_DIR, "skills")
     names = skill_names()
     dst_root = os.path.join(profile_home, "skills", "crew")
     stale = [n for n in names
-             if not _same(os.path.join(src, n, "SKILL.md"), os.path.join(dst_root, n, "SKILL.md"))]
+             if not _same(_src("skills/%s/SKILL.md" % n), os.path.join(dst_root, n, "SKILL.md"))]
     if not stale:
         return "OK", "skills %s (up to date)" % ", ".join(names)
     if not apply:
@@ -1261,7 +1433,7 @@ def step_skills(profile_home, apply):
     for n in stale:
         d = os.path.join(dst_root, n)
         os.makedirs(d, exist_ok=True)
-        shutil.copy2(os.path.join(src, n, "SKILL.md"), os.path.join(d, "SKILL.md"))
+        shutil.copy2(_src("skills/%s/SKILL.md" % n), os.path.join(d, "SKILL.md"))
     return "CHANGED", "skills %s installed into %s" % (", ".join(stale), dst_root)
 
 
@@ -1312,19 +1484,38 @@ def _skills_excess(home, extras):
     return out
 
 
-def _extras_missing(home, source_home, extras):
-    """Extras that exist in the installing profile's skills dir but not yet in the role's."""
-    return [rel for rel in _extras_clean(extras)
-            if os.path.isdir(os.path.join(source_home, "skills", rel))
-            and not os.path.isdir(os.path.join(home, "skills", rel))]
+def _skill_pairs(tpl, source_home):
+    """[(home the skill is copied from, path under its skills/)] a role keeps besides skills/crew/: its skills_extra
+    (from the installing profile) and the skills inherit.skills resolves to (crew_lineup.resolve_set: a profile's set,
+    an exact list, or from + add - drop). A problem (a name that cannot be found, a bad line) is (None, problem)."""
+    pairs = [(source_home, rel) for rel in _extras_clean(_conf_list(os.path.join(tpl, "settings.conf"), "skills_extra"))]
+    inh, problems = _inherit(tpl)
+    sources = _owner_sources(None, source_home)
+    got, bad = _crew_lineup().resolve_set("skills", inh["skills"], sources)
+    pairs += [(None, p) for p in problems + bad]
+    pairs += [(sources["home_of"](prof), rel) for _name, (prof, rel) in got.items()]
+    seen, out = set(), []
+    for pair in pairs:
+        if pair[1] not in seen:
+            seen.add(pair[1])
+            out.append(pair)
+    return out
+
+
+def _extras_missing(home, pairs):
+    """The (source home, path) skills a role keeps that are not in its skills dir yet; (None, name) when the named
+    skill cannot be found anywhere."""
+    return [(src, rel) for src, rel in pairs
+            if src is None or (os.path.isdir(os.path.join(src, "skills", rel))
+                               and not os.path.isdir(os.path.join(home, "skills", rel)))]
 
 
 def role_skills_todo(home, tpl, source_home):
-    """(excess entries, missing extras, marker missing) for one role profile; all empty when slim."""
-    extras = _conf_list(os.path.join(tpl, "settings.conf"), "skills_extra")
+    """(excess entries, missing skills, marker missing) for one role profile; all empty when slim."""
+    pairs = _skill_pairs(tpl, source_home)
     # Hermes reads the opt-out at the profile root (tools/skills_sync.py: _hermes_home() / marker), not in skills/.
     marker = not os.path.exists(os.path.join(home, NO_BUNDLED_SKILLS_MARKER))
-    return _skills_excess(home, extras), _extras_missing(home, source_home, extras), marker
+    return _skills_excess(home, [rel for _s, rel in pairs]), _extras_missing(home, pairs), marker
 
 
 def crew_owned(home):
@@ -1344,17 +1535,20 @@ def step_role_skills(home, tpl, source_home, apply, owned=True):
         return "SKIP", "role skills of %s left alone: crew did not create it (no %s)" % (
             os.path.basename(home), SHIPPED_RECORD)
     excess, missing, marker = role_skills_todo(home, tpl, source_home)
+    unknown = [rel for src, rel in missing if src is None]
+    missing = [(src, rel) for src, rel in missing if src is not None]
+    if unknown:
+        return "FAILED", "role skills of %s: %s" % (os.path.basename(home), "; ".join(unknown))
     if not (excess or missing or marker):
         return "OK", "role skills slim (%s)" % os.path.basename(home)
     if not apply:
         return "CHANGED", "role skills -> drop %d entr%s from %s%s" % (
             len(excess), "y" if len(excess) == 1 else "ies", root,
-            (", add %s" % ", ".join(missing)) if missing else "")
-    extras = _conf_list(os.path.join(tpl, "settings.conf"), "skills_extra")
+            (", add %s" % ", ".join(rel for _s, rel in missing)) if missing else "")
     os.makedirs(root, exist_ok=True)
-    for rel in missing:
-        shutil.copytree(os.path.join(source_home, "skills", rel), os.path.join(root, rel), symlinks=True)
-    for name in _skills_excess(home, extras):
+    for src, rel in missing:
+        shutil.copytree(os.path.join(src, "skills", rel), os.path.join(root, rel), symlinks=True)
+    for name in _skills_excess(home, [rel for _s, rel in _skill_pairs(tpl, source_home)]):
         path = os.path.join(root, name)
         print("  removed %s" % path)
         if os.path.islink(path) or os.path.isfile(path):
@@ -1364,7 +1558,8 @@ def step_role_skills(home, tpl, source_home, apply, owned=True):
     if marker:
         Path(os.path.join(home, NO_BUNDLED_SKILLS_MARKER)).write_text(NO_BUNDLED_SKILLS_TEXT, encoding="utf-8")
     return "CHANGED", "role skills slim: dropped %d entr%s%s" % (
-        len(excess), "y" if len(excess) == 1 else "ies", (", added %s" % ", ".join(missing)) if missing else "")
+        len(excess), "y" if len(excess) == 1 else "ies",
+        (", added %s" % ", ".join(rel for _s, rel in missing)) if missing else "")
 
 
 # ---------------------------------------------------------------- first-call prompt budget
@@ -1381,7 +1576,7 @@ def roles_budget():
     """prompt_budget_tokens from the package's roles.json (None when the key is absent)."""
     import json
     try:
-        with open(SRC_DIR / "roles" / "roles.json", encoding="utf-8") as fh:
+        with open(os.path.join(_roles_dir(), "roles.json"), encoding="utf-8") as fh:
             val = json.load(fh).get("prompt_budget_tokens")
         return int(val) if val else None
     except Exception:
@@ -1458,8 +1653,15 @@ def step_prompt_budget(prefix, apply):
 # settings.conf (config keys). Fields the owner edits in the profile are never overwritten:
 # the installer records what it shipped and only replaces a file still equal to that record.
 
-ROLE_ORDER = ["coordinator", "worker", "content", "verifier"]
-ROLE_DESCS = {
+# The roles in force: the package's roles.json for the shipped crew, a lineup's overlay otherwise (crew_lineup.build
+# writes <crew folder>/lineup-build/<name>/ with roles/, templates/profiles/ and skills/crew-role-*). ROLE_ORDER,
+# ROLE_DESCS, ROLE_FILES and the role skills of PLUGIN_FILES are derived from that roles.json by _use_roles.
+LINEUP = "default"            # the lineup's name ("default" = the shipped crew)
+LINEUP_RECORD = "default"     # what crew.lineup records: the name, or the absolute path of a lineup given as a path
+LINEUP_DIR = None             # the overlay root while a lineup is in force
+ROLE_ORDER = []
+ROLE_KINDS = {}
+_SHIPPED_DESCS = {
     "coordinator": "Crew coordinator: turns an ask into a contract, splits independent parts, "
                    "closes on the verifier's verdict.",
     "worker": "Crew worker: code, config, infra and web work on one card; one writer, "
@@ -1469,24 +1671,89 @@ ROLE_DESCS = {
     "verifier": "Crew verifier: runs the card's proof itself, read-only, never fixes; "
                 "two fails block the card.",
 }
+ROLE_DESCS = dict(_SHIPPED_DESCS)
 SHIPPED_RECORD = os.path.join("crew", "template-shipped.json")
 
 
+def _overlay_rel(rel):
+    """A package-relative path a lineup's overlay replaces: the roles files, the role templates, the role skills."""
+    return rel.startswith(("roles/", "templates/profiles/", "skills/crew-role-"))
+
+
+def _src_root(rel):
+    """The tree a package-relative file is copied from: the lineup overlay for the role files, else the package."""
+    return LINEUP_DIR if LINEUP_DIR and _overlay_rel(rel) else str(SRC_DIR)
+
+
+def _src(rel):
+    return os.path.join(_src_root(rel), rel)
+
+
+def _roles_dir():
+    """The roles/ dir in force (roles.json + briefs/)."""
+    return os.path.join(_src_root("roles/roles.json"), "roles")
+
+
+def _plugin_ok(dst):
+    """Every PLUGIN_FILES entry in the plugin copy at dst equals its source."""
+    return all(_same(_src(rel), os.path.join(dst, rel)) for rel in PLUGIN_FILES)
+
+
+def _use_roles(overlay=None, name="default", record=None):
+    """Put the roles of a lineup overlay (None: the shipped crew) in force: the sources every role step copies from and
+    ROLE_ORDER / ROLE_DESCS / ROLE_FILES / the crew-role-* entries of PLUGIN_FILES, read off its roles.json. The shipped
+    crew gives exactly the lists the package always had (coordinator, worker, content, verifier)."""
+    global LINEUP, LINEUP_RECORD, LINEUP_DIR, ROLE_ORDER, ROLE_DESCS, ROLE_FILES, PLUGIN_FILES, ROLE_KINDS
+    LINEUP_DIR = os.path.abspath(overlay) if overlay else None
+    LINEUP = name if overlay else "default"
+    LINEUP_RECORD = (record or name) if overlay else "default"
+    with open(os.path.join(_roles_dir(), "roles.json"), encoding="utf-8") as fh:
+        data = json.load(fh)
+    entries = [r for r in (data.get("roles") or []) if isinstance(r, dict) and str(r.get("name") or "").strip()]
+    order, files, descs, writers = [], ["roles.json"], {}, []
+    for r in entries:
+        role = str(r["name"]).strip()
+        kind = crew_card._role_kind(r)
+        order.append(role)
+        brief = str(r.get("brief") or "briefs/%s.md" % role)
+        if brief not in files:
+            files.append(brief)
+        if kind == "writer":
+            writers.append(role)
+        shipped = _SHIPPED_DESCS.get(role) if (not LINEUP_DIR or kind != "writer") else None
+        descs[role] = (str(r.get("description") or "").strip() if LINEUP_DIR and kind == "writer" else "") \
+            or shipped or "Crew %s: %s" % (role, str(r.get("purpose") or "").strip())
+    ROLE_ORDER, ROLE_FILES, ROLE_DESCS = order, files, descs
+    ROLE_KINDS = {str(r["name"]).strip(): crew_card._role_kind(r) for r in entries}
+    base = _PLUGIN_BASE_FILES
+    at = base.index("skills/crew-verifier/SKILL.md") + 1
+    PLUGIN_FILES = base[:at] + ["skills/crew-role-%s/SKILL.md" % w for w in writers] + base[at:]
+
+
+_use_roles(None)
+
+
+def _whole_section(key, val):
+    """A settings line that replaces a whole top-level section: an undotted key given a list or mapping literal."""
+    return "." not in key and val.strip()[:1] in ("[", "{")
+
+
 def _apply_settings(profile, conf_path):
-    """Apply key = value lines from a template settings file with `hermes config set` (Hermes's own writer).
-    Returns the keys it changed; a key whose set failed is not in the list, so the next check still reports it."""
+    """Apply key = value lines from a template settings file with `hermes config set` (Hermes's own writer); a value
+    that replaces a whole section is set with --force. Returns (keys changed, failures): a failed set is a failed step,
+    and its key is not in the changed list, so the next check still reports it."""
     entries = _conf_entries(conf_path)
     have = _cfg_many(profile, [k for k, _v in entries])
-    changed = []
+    changed, failed = [], []
     for key, val in entries:
         if have[key] is not None and _canon(have[key]) == _canon(val):
             continue
-        r = h(profile, "config", "set", key, val)
+        r = h(profile, "config", "set", *(["--force"] if _whole_section(key, val) else []), key, val)
         if r.returncode == 0:
             changed.append(key)
         else:
-            print("  config set %s failed: %s" % (key, ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1]))
-    return changed
+            failed.append("config set %s failed: %s" % (key, _set_failed(r)))
+    return changed, failed
 
 
 def _shipped_record(profile_home):
@@ -1516,7 +1783,7 @@ def _sha(text):
 
 def _role_plans(profile):
     """[(role, profile name, profile home, template dir)] for every template on disk."""
-    tpl_root = SRC_DIR / "templates" / "profiles"
+    tpl_root = Path(_src_root("templates/profiles/")) / "templates" / "profiles"
     if not tpl_root.is_dir():
         return []
     return [(role, "%s%s" % (profile, role), resolve_profile_home("%s%s" % (profile, role)),
@@ -1524,24 +1791,117 @@ def _role_plans(profile):
             for role in ROLE_ORDER if (tpl_root / role).is_dir()]
 
 
+# ---------------------------------------------------------------- what a role profile inherits
+# A role profile is created bare and gets exactly what its settings.conf `inherit.*` lines say (_inherit): env = the
+# .env and the credential sections (ENV_SECTIONS) of a profile, hooks = its config.yaml hooks section, mcp = its
+# mcp_servers (or the named servers of the installing profile). Skills are step_role_skills's part (_skill_pairs).
+# A section is replaced whole with `hermes config set --force`; the .env is copied as a file (Hermes has no writer that
+# takes a whole .env), owner-only.
+
+NO_ENV_TEXT = "# crew: this role profile inherits no credentials (inherit.env = false in its settings.conf).\n"
+
+
+def _env_lines(text):
+    return [l.strip() for l in (text or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+def _same_section(a, b):
+    """Two section values are the same; an empty or absent section is one value (mcp_servers [] == {} == unset)."""
+    return (a or None) == (b or None)
+
+
+def inherit_plan(name, home, tpl, source_profile):
+    """What role profile `name` still needs from the profiles its inherit lines name, changing nothing:
+    {"env": .env text to write or None, "sections": [(key, value)], "problems": [str]}."""
+    inh, problems = _inherit(tpl)
+    plan = {"env": None, "sections": [], "problems": list(problems)}
+
+    def source(key):
+        value = inh[key]
+        prof = source_profile if value == "owner" else value
+        if not os.path.isdir(resolve_profile_home(prof)):
+            plan["problems"].append("inherit.%s: no Hermes profile %r" % (key, prof))
+            return None
+        return prof
+
+    want = {}
+    cur_env = Path(home, ".env").read_text(encoding="utf-8") if os.path.isfile(os.path.join(home, ".env")) else ""
+    if inh["env"]:
+        prof = source("env")
+        if prof is not None:
+            path = os.path.join(resolve_profile_home(prof), ".env")
+            text = Path(path).read_text(encoding="utf-8") if os.path.isfile(path) else ""
+            if _env_lines(text) != _env_lines(cur_env):
+                plan["env"] = text if _env_lines(text) else NO_ENV_TEXT
+            want.update(_sections(prof, ENV_SECTIONS))
+    else:
+        if _env_lines(cur_env):
+            plan["env"] = NO_ENV_TEXT
+        want.update({k: None for k in ENV_SECTIONS})
+    if inh["hooks"]:
+        prof = source("hooks")
+        if prof is not None:
+            want["hooks"] = _sections(prof, ["hooks"])["hooks"]
+    else:
+        want["hooks"] = None
+    if inh["mcp"] is False:
+        want["mcp_servers"] = None
+    else:
+        got, bad = _crew_lineup().resolve_set("mcp", inh["mcp"], _owner_sources(source_profile))
+        plan["problems"] += bad
+        if not bad:
+            want["mcp_servers"] = {n: cfg for n, (_prof, cfg) in got.items()}
+    cur = _sections(name, list(want))
+    plan["sections"] = [(k, v if v is not None else {}) for k, v in want.items() if not _same_section(cur.get(k), v)]
+    return plan
+
+
+def inherit_problems(name, home, tpl, source_profile):
+    """inherit_plan as settings_problems-style lines ([] when the role profile has what its inherit lines say)."""
+    plan = inherit_plan(name, home, tpl, source_profile)
+    return (["inherit.env: .env differs from its source"] if plan["env"] is not None else []) \
+        + ["%s differs from what inherit says" % k for k, _v in plan["sections"]] + plan["problems"]
+
+
+def apply_inherit(name, home, tpl, source_profile):
+    """Give role profile `name` what its inherit lines say. Returns (what changed, failures)."""
+    plan = inherit_plan(name, home, tpl, source_profile)
+    changed, failed = [], list(plan["problems"])
+    if plan["env"] is not None:
+        path = os.path.join(home, ".env")
+        Path(path).write_text(plan["env"], encoding="utf-8")
+        if POSIX_MODES:
+            os.chmod(path, 0o600)
+        changed.append(".env")
+    for key, value in plan["sections"]:
+        r = _section_set(name, key, value)
+        if r.returncode == 0:
+            changed.append(key)
+        else:
+            failed.append("config set --force %s failed: %s" % (key, _set_failed(r)))
+    return changed, failed
+
+
 def _provision_role_profile(name, home, tpl, source_home, owned):
     """Give a role profile the same plugin (scripts included), crew skills, roles file and crew dirs as the
     installing profile: a clone carries the enabled list but not the plugin itself, and without
     it the role guards (budget hard stop, verifier read-only) and the card tool do not exist.
     Then cut its skills dir down to what the role uses (step_role_skills, crew-created profiles only)."""
-    done = []
+    done, failed = [], []
     for step in (step_plugin, step_skills, step_scripts, step_old_shim, step_roles, step_crew_dirs,
                  lambda h_, a_: step_role_skills(h_, tpl, source_home, a_, owned)):
         try:
             status, detail = step(home, True)
             if status == "CHANGED":
                 done.append(detail.split(" - ")[0])
+            elif status == "FAILED":
+                failed.append(detail)
         except Exception as exc:
-            done.append("%s failed: %s" % (getattr(step, "__name__", "step"), exc))
+            failed.append("%s failed: %s" % (getattr(step, "__name__", "step"), exc))
     if not _plugin_enabled(name):
         h(name, "plugins", "enable", "crew", "--no-allow-tool-override")
         done.append("plugin enabled")
-    return done
+    return done, failed
 
 
 def step_profiles(source_profile, prefix, apply, no_profiles=False):
@@ -1561,7 +1921,8 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             cur = Path(os.path.join(home, "SOUL.md")).read_text(encoding="utf-8")
         # Write SOUL.md when the profile is new, or when the file is still the one we shipped.
         soul_need = (not exists) or (cur != shipped and rec.get("SOUL.md") == _sha(cur or ""))
-        settings_need = exists and bool(settings_problems(name, role, tpl))
+        settings_need = exists and bool(settings_problems(name, role, tpl)
+                                        or (crew_owned(home) and inherit_problems(name, home, tpl, source_profile)))
         # A role profile holds its own copy of the plugin (scripts included), skills and roles file; a clone
         # carries none of them, and a package update has to reach the role copies too.
         provision_need = exists and not (
@@ -1569,10 +1930,11 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             # touched __init__.py (a new slash command, say) left the role copies stale while this step
             # said "up to date", and the parity proof then failed on 5 profiles. The plugin IS the
             # package root, so its files are compared against plugins/crew/ in the profile.
-            _tree_ok(str(SRC_DIR), os.path.join(home, "plugins", "crew"), PLUGIN_FILES)
+            _plugin_ok(os.path.join(home, "plugins", "crew"))
+            and step_skills(home, False)[0] == "OK"
             and not _stale_scripts(os.path.join(home, "scripts"))
             and not os.path.lexists(os.path.join(home, "scripts", OLD_PROOFS_SHIM))
-            and _tree_ok(str(SRC_DIR / "roles"), os.path.join(home, "roles", "crew"), ROLE_FILES)
+            and _tree_ok(_roles_dir(), os.path.join(home, "roles", "crew"), ROLE_FILES)
             and (not crew_owned(home)
                  or not any(role_skills_todo(home, tpl, resolve_profile_home(source_profile)))))
         if soul_need or settings_need or provision_need:
@@ -1585,18 +1947,18 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
                 print("  override %s" % problem)
         return "CHANGED", "role profiles -> " + ", ".join(
             ("create " if not t[4] else "update ") + t[1] for t in todo)
-    done = []
+    done, failures = [], []
     for role, name, home, tpl, existed in todo:
         if not os.path.isdir(home):
-            # --clone-from: Hermes has no partial clone. The role needs the provider credentials (.env) and, through
-            # config.yaml, the owner's shell-hook gates; both come with the clone, which also copies SOUL.md (replaced
-            # below), skills (cut to skills/crew below) and memories/MEMORY.md + USER.md. Channels are stripped by Hermes.
-            r = h(source_profile, "profile", "create", name, "--clone-from", source_profile,
-                  "--description", ROLE_DESCS.get(role, ""))
+            # Bare: no clone, no bundled skills - the least Hermes's `profile create` copies (a fresh config.yaml with
+            # the active profile's model block, an empty .env, the opt-out marker). What the role takes from the owner
+            # or another profile is what its inherit lines say (apply_inherit, step_role_skills), nothing else.
+            r = h(source_profile, "profile", "create", name, "--no-skills", "--description", ROLE_DESCS.get(role, ""))
             if r.returncode != 0:
-                print("  profile create %s failed: %s" % (name, ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1]))
+                print("  profile create %s failed: %s" % (name, _set_failed(r)))
         if not os.path.isdir(home):
             done.append("%s FAILED" % name)
+            failures.append("%s: profile create failed" % name)
             continue
         owned = (not existed) or crew_owned(home)
         os.makedirs(os.path.join(home, "crew"), exist_ok=True)
@@ -1609,14 +1971,122 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             if (not existed) or cur == shipped or rec.get("SOUL.md") == _sha(cur or ""):
                 Path(dst).write_text(shipped, encoding="utf-8")
                 rec["SOUL.md"] = _sha(shipped)
-        keys = _apply_settings(name, os.path.join(tpl, "settings.conf"))
+        # Provisioned first: `plugins enable crew` (a bare profile does not have it yet) adds the crew toolset to every
+        # platform list, so the settings applied after it are what stays (platform_toolsets.slack = []).
+        provisioned, failed = _provision_role_profile(name, home, tpl, resolve_profile_home(source_profile), owned)
+        keys, bad = _apply_settings(name, os.path.join(tpl, "settings.conf"))
+        failed += bad
         for problem in _override_lines(os.path.join(tpl, "settings.conf"))[1]:
             print("  override %s" % problem)
+        if owned:
+            got, bad = apply_inherit(name, home, tpl, source_profile)
+            keys += ["inherit " + k for k in got]
+            failed += bad
         rec["settings"] = keys
-        rec["provisioned"] = _provision_role_profile(name, home, tpl, resolve_profile_home(source_profile), owned)
+        rec["role"] = role
+        rec["kind"] = ROLE_KINDS.get(role, "")
+        rec["provisioned"] = provisioned
         Path(os.path.join(home, SHIPPED_RECORD)).write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
+        for f in failed:
+            print("  %s: %s" % (name, f))
+        failures += ["%s: %s" % (name, f) for f in failed]
         done.append(name if not existed else "%s (%s)" % (name, ",".join(keys) or "up to date"))
+    if failures:
+        return "FAILED", "role profiles -> %s; failed: %s" % (", ".join(done), "; ".join(failures))
     return "CHANGED", "role profiles -> " + ", ".join(done)
+
+
+# ---------------------------------------------------------------- roles a lineup dropped
+# A writer profile crew created (it carries crew/template-shipped.json) for a role the crew in force no longer has:
+# removed with Hermes's own `hermes profile delete <name> --yes`, unless the board still holds open cards assigned to
+# it (then it stays, and the step says so). Never a profile crew did not create, never coordinator or verifier.
+
+ROLE_NAME_RX = re.compile(r"^[a-z]{2,24}$")
+CLOSED_STATUSES = ("done", "archived")
+
+
+def dropped_profiles(prefix, source_profile=""):
+    """[(role, name, home)] of crew-created writer profiles under prefix whose role is not in ROLE_ORDER."""
+    root = os.path.dirname(resolve_profile_home(prefix + "coordinator"))
+    if not os.path.isdir(root):
+        return []
+    out = []
+    for name in sorted(os.listdir(root)):
+        role = name[len(prefix):] if name.startswith(prefix) else ""
+        home = os.path.join(root, name)
+        if (not ROLE_NAME_RX.match(role) or role in ("coordinator", "verifier", "all") or role in ROLE_ORDER
+                or name == source_profile or not os.path.isdir(home) or not crew_owned(home)):
+            continue
+        rec = _shipped_record(home)
+        if rec.get("role") and rec["role"] != role:
+            continue
+        # a writer: recorded so since lineups exist; before that the only writers crew created were the shipped ones
+        if (rec.get("kind") or ("writer" if role in crew_card.DEFAULT_WRITERS else "")) != "writer":
+            continue
+        out.append((role, name, home))
+    return out
+
+
+def open_cards(name):
+    """Cards on the crew's board assigned to `name` that are not done or archived; 0 when there is no board, None
+    when the board cannot be read (the profile is then kept)."""
+    import sqlite3
+    try:
+        db = crew_card.kanban_db()
+    except Exception:
+        return None
+    if not db:
+        return 0
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=5)
+        try:
+            row = conn.execute("select count(*) from tasks where assignee = ? and status not in (%s)"
+                               % ",".join("?" * len(CLOSED_STATUSES)), (name,) + CLOSED_STATUSES).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row else 0
+
+
+def step_dropped_roles(source_profile, prefix, apply, no_profiles=False):
+    if no_profiles:
+        return "SKIP", "dropped role profiles (--no-profiles)"
+    found = dropped_profiles(prefix, source_profile)
+    if not found:
+        return "OK", "no role profile outside the crew (%s)" % ", ".join(ROLE_ORDER)
+    kept, remove = [], []
+    for role, name, home in found:
+        n = open_cards(name)
+        if n is None:
+            kept.append("kept %s: board unreadable" % name)
+        elif n:
+            kept.append("kept %s: %d open card%s" % (name, n, "" if n == 1 else "s"))
+        else:
+            remove.append((role, name, home))
+    if not remove:
+        return "OK", "; ".join(kept)
+    if not apply:
+        return "CHANGED", "; ".join(["remove %s (role %s not in the crew, no open cards)" % (n, r)
+                                     for r, n, _h in remove] + kept)
+    done, failed = [], []
+    for role, name, home in remove:
+        r = h(source_profile, "profile", "delete", name, "--yes")
+        if os.path.isdir(home):
+            failed.append("%s still there after `hermes profile delete %s --yes`: %s" % (
+                name, name, ((r.stderr or r.stdout or "").strip().splitlines() or ["?"])[-1]))
+            continue
+        done.append("removed %s" % name)
+        # its role skill goes with it from every crew copy (only while no role of the crew in force is named so)
+        skill = "crew-role-%s" % role
+        if skill not in skill_names():
+            for _label, other in parity_homes(resolve_profile_home(source_profile), prefix, False):
+                path = os.path.join(other, "skills", "crew", skill)
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                    print("  removed %s" % path)
+    detail = "; ".join(done + kept + failed)
+    return ("FAILED" if failed else "CHANGED"), detail
 
 
 # ---------------------------------------------------------------- every profile on the installed version
@@ -1639,6 +2109,26 @@ def parity_homes(profile_home, prefix, no_profiles):
     return out
 
 
+def _parity_compare(crew_parity_check, name, home):
+    """crew_parity_check.compare for one profile. With a lineup in force the role files come from its overlay, so the
+    shipped files are compared in two groups: the package's against the package, the overlay's against the overlay."""
+    import types
+    if not LINEUP_DIR:
+        return crew_parity_check.compare(str(SRC_DIR), [(name, home)], mod=types.SimpleNamespace(
+            PLUGIN_FILES=PLUGIN_FILES, ROLE_FILES=ROLE_FILES, skill_names=skill_names))
+    total = {"pairs": 0, "mismatches": 0, "missing": 0, "skipped": 0, "detail": []}
+    for root in (str(SRC_DIR), LINEUP_DIR):
+        part = types.SimpleNamespace(
+            PLUGIN_FILES=[r for r in PLUGIN_FILES if _src_root(r) == root],
+            ROLE_FILES=[r for r in ROLE_FILES if _src_root("roles/" + r) == root],
+            skill_names=lambda root=root: [n for n in skill_names() if _src_root("skills/%s/SKILL.md" % n) == root])
+        res = crew_parity_check.compare(root, [(name, home)], mod=part)
+        for key in ("pairs", "mismatches", "missing", "skipped"):
+            total[key] += res[key]
+        total["detail"] += res["detail"]
+    return total
+
+
 def _lagging(profile_home, prefix, no_profiles):
     """([(name, home, description)] of profiles off the package's version or files, homes checked)."""
     import crew_parity_check
@@ -1648,7 +2138,7 @@ def _lagging(profile_home, prefix, no_profiles):
     for name, home in homes:
         if os.path.realpath(os.path.join(home, "plugins", "crew")) == os.path.realpath(SRC_DIR):
             continue       # `hermes plugins install` mode: this checkout is the plugin dir
-        res = crew_parity_check.compare(str(SRC_DIR), [(name, home)], mod=sys.modules[__name__])
+        res = _parity_compare(crew_parity_check, name, home)
         have = _plugin_version(os.path.join(home, "plugins", "crew", "plugin.yaml"))
         if have != want or res["mismatches"] or res["missing"]:
             files = sorted({d["file"] + (" (missing)" if d["problem"] == "copy missing" else "") for d in res["detail"]})
@@ -1696,6 +2186,7 @@ def _steps(profile_home, profile, args):
         ("scripts", lambda a: step_scripts(profile_home, a)),
         ("roles", lambda a: step_roles(profile_home, a)),
         ("crew-dirs", lambda a: step_crew_dirs(profile_home, a)),
+        ("lineups", step_lineups),
         ("owner", lambda a: step_owner(profile, a, getattr(args, "owner", False))),
         ("enable", lambda a: step_enable(profile, a)),
         ("config", lambda a: step_config(profile_home, profile, a)),
@@ -1703,6 +2194,8 @@ def _steps(profile_home, profile, args):
         ("chat-kanban", lambda a: step_chat_kanban(profile, a, args.chat_kanban)),
         ("menu-priority", lambda a: step_menu_priority(profile, a, args.telegram_menu)),
         ("profiles", lambda a: step_profiles(profile or "default", args.profile_prefix, a, args.no_profiles)),
+        ("dropped-roles", lambda a: step_dropped_roles(profile or "default", args.profile_prefix, a,
+                                                       args.no_profiles)),
         ("other-copies", lambda a: step_other_copies(profile_home, args.profile_prefix, a)),
         ("prompt-budget", lambda a: step_prompt_budget(args.profile_prefix, a)),
         ("permissions", lambda a: step_permissions(profile_home, profile, args.profile_prefix, a)),
@@ -1721,6 +2214,8 @@ def report(profile, profile_home, args):
     print("plugin: crew %s" % ("enabled" if _plugin_enabled(profile) else "NOT enabled"))
     print("commands: /crew <ask> (intake) | /crew-diagnose [state] (read-only pass, a skill) | "
           "/crew-<option>: status|graph|stop")
+    if LINEUP != "default":
+        print("lineup: %s (writer roles %s)" % (LINEUP, ", ".join(_writers())))
     for role, name, home, _tpl in _role_plans(args.profile_prefix):
         print("role profile: %s (%s)" % (name, "present" if os.path.isdir(home) else "MISSING"))
     for line in prompt_report(args.profile_prefix)[0]:
@@ -1748,6 +2243,109 @@ def report(profile, profile_home, args):
     else:
         pcid = _cron_id(profile, CRON_PROOFS_NAME)
         print("proofs cron: %s" % (pcid or "not registered (--nightly-proofs registers it)"))
+
+
+_LINEUP_SOURCE = ""
+
+
+def _crew_lineup():
+    """scripts/crew_lineup.py: finds, validates and builds lineups, and keeps <crew folder>/lineup.json."""
+    import crew_lineup
+    return crew_lineup
+
+
+def _writers():
+    return [r for r in ROLE_ORDER if ROLE_KINDS.get(r) == "writer"]
+
+
+def _lineup_state_exists():
+    try:
+        return os.path.isfile(os.path.join(_crew_lineup().crew_dir(), "lineup.json"))
+    except Exception:
+        return False
+
+
+def _lineup_state(**fields):
+    try:
+        _crew_lineup().write_state(**fields)
+    except Exception as exc:                       # the state file is a report; the install itself goes on
+        print("  lineup state not written: %s" % exc)
+
+
+def _same_lineup(lineup, plan):
+    """`lineup` (a name or a recorded path) is the lineup an uninstall plan is for."""
+    if not lineup or lineup == "default":
+        return False
+    if lineup == plan["name"]:
+        return True
+    try:
+        return os.path.abspath(_crew_lineup().find(lineup)) == os.path.abspath(plan["path"])
+    except Exception:  # noqa: BLE001 - a lineup that no longer resolves is not this one
+        return False
+
+
+def _uninstall_prepare(name, prefix):
+    """(plan, "") for `--uninstall-lineup NAME`, or (None, why not). Refused while a role profile of the lineup has
+    open cards (or the board cannot be read): the cards would lose the profile they run in."""
+    try:
+        cl = _crew_lineup()
+        plan = cl.uninstall_plan(name)
+    except Exception as exc:  # noqa: BLE001 - LineupError and an unloadable crew_lineup both refuse
+        return None, str(exc)
+    busy = []
+    for role in plan["roles"]:
+        n = open_cards(prefix + role)
+        if n is None:
+            return None, "the board cannot be read, so open cards of %s cannot be ruled out" % (prefix + role)
+        if n:
+            busy.append("%s%s (%d open card%s)" % (prefix, role, n, "" if n == 1 else "s"))
+    if busy:
+        return None, "finish or archive the open cards first: " + ", ".join(busy)
+    return plan, ""
+
+
+def _uninstall_leftovers(plan, prefix, check):
+    """The role profiles of an uninstalled lineup still on disk (a role the crew in force also has is not a leftover).
+    For --check also the build folder, so a pending uninstall is reported."""
+    left = [prefix + r for r in plan["roles"]
+            if r not in ROLE_ORDER and os.path.isdir(resolve_profile_home(prefix + r))]
+    return left + (list(plan["dirs"]) if check else [])
+
+
+def _select_lineup(lineup, check, source_profile="default"):
+    """Put `lineup` in force (_use_roles): validated and built by crew_lineup into its overlay - for --check into a
+    throwaway dir, so a check writes nothing. Returns the error text when it cannot be used, else ""."""
+    global _LINEUP_SOURCE
+    if lineup == "default":
+        _LINEUP_SOURCE = ""
+        _use_roles(None)
+        return ""
+    try:
+        cl = _crew_lineup()
+    except ImportError as exc:
+        return "scripts/crew_lineup.py cannot be loaded (%s)" % exc
+    try:
+        path = cl.find(lineup)
+        sources = _owner_sources(source_profile)
+        name = cl.load(path, sources)["name"]
+        if check:
+            import atexit
+            import tempfile
+            tmp = tempfile.mkdtemp(prefix="crew-lineup-check-")
+            atexit.register(shutil.rmtree, tmp, True)
+            overlay = cl.build(path, out_root=tmp, sources=sources)
+        else:
+            overlay = cl.build(path, sources=sources)
+    except cl.LineupError as exc:
+        return str(exc)
+    # a lineup given as a path is recorded as that path, so the next run finds the same file
+    pathish = os.sep in lineup or "/" in lineup or lineup.endswith(".json")
+    _LINEUP_SOURCE = path
+    try:
+        _use_roles(overlay, name, os.path.abspath(path) if pathish else name)
+    except (OSError, ValueError) as exc:
+        return "the built overlay %s is unusable: %s" % (overlay, exc)
+    return ""
 
 
 def main():
@@ -1786,18 +2384,50 @@ def main():
                     help="do not create/update the role profiles from templates/")
     ap.add_argument("--profile-prefix", default="crew-",
                     help="name prefix for the role profiles (default crew-)")
+    ap.add_argument("--lineup", default=None, metavar="NAME|PATH",
+                    help="the crew's writer roles from a lineup (<crew folder>/lineups/NAME.json, the package's "
+                         "lineups/, or a path); `default` is the shipped crew. Omitted: the lineup recorded in "
+                         "config crew.lineup, else the shipped crew")
+    ap.add_argument("--uninstall-lineup", default=None, metavar="NAME",
+                    help="the reverse of installing a lineup: its role profiles and their role skills are removed "
+                         "entirely, the crew returns to the shipped one if it was in force; the lineup file stays. "
+                         "Refused while one of its role profiles has open cards")
     args = ap.parse_args()
     global PROFILE_PREFIX
     PROFILE_PREFIX = args.profile_prefix
 
     profile_home = resolve_profile_home(args.profile)
     profile = (args.profile or "").strip()
+    lineup = (args.lineup or "").strip() or _config_get(profile, "crew.lineup") or "default"
+    uninstall = None
+    if (args.uninstall_lineup or "").strip():
+        uninstall, err = _uninstall_prepare(args.uninstall_lineup.strip(), args.profile_prefix)
+        if err:
+            print("lineup %s not uninstalled: %s - nothing was changed" % (args.uninstall_lineup.strip(), err))
+            return 1
+        if (args.lineup or "").strip() and _same_lineup((args.lineup or "").strip(), uninstall):
+            print("--lineup and --uninstall-lineup name the same lineup - nothing was changed")
+            return 1
+        if _same_lineup(lineup, uninstall):
+            lineup = "default"          # the lineup in force goes: the crew is the shipped one again
+    stateful = not args.check and (lineup != "default" or _lineup_state_exists())
+    if stateful:
+        _lineup_state(active=lineup, status="building", error="")
+    err = _select_lineup(lineup, args.check, profile or "default")
+    if err:
+        print("lineup %s refused: %s - nothing was changed" % (lineup, err))
+        if stateful:
+            _lineup_state(active=lineup, status="failed", error=err)
+        return 1
+    if stateful:
+        _lineup_state(active=LINEUP, status="building", error="", roles=_writers(), source=_LINEUP_SOURCE)
     steps = _steps(profile_home, profile, args)
 
     if args.check:
-        print("crew %s (installed %s)" % (
+        print("crew %s (installed %s)%s" % (
             _plugin_version(os.path.join(SRC_DIR, "plugin.yaml")) or "?",
-            _plugin_version(os.path.join(profile_home, "plugins", "crew", "plugin.yaml")) or "?"))
+            _plugin_version(os.path.join(profile_home, "plugins", "crew", "plugin.yaml")) or "?",
+            "" if LINEUP == "default" else ", lineup %s: %s" % (LINEUP, ", ".join(_writers()))))
         needed = []
         for name, fn in steps:
             status, detail = fn(False)
@@ -1806,7 +2436,7 @@ def main():
         if not args.no_profiles:
             for line in prompt_report(args.profile_prefix)[0]:
                 print(line)
-        if not needed:
+        if not needed and not (uninstall and _uninstall_leftovers(uninstall, args.profile_prefix, True)):
             print("crew check: complete - nothing to change")
             return 0
         for name, detail in needed:
@@ -1814,6 +2444,8 @@ def main():
             if name == "graph-http":
                 print(render_graph_unit(profile_home, args.graph_port))
         print("%d change(s) needed" % len(needed))
+        if uninstall:
+            print(_crew_lineup().describe_uninstall(uninstall, args.profile_prefix))
         return 1
 
     if args.publish and not args.no_service:
@@ -1826,13 +2458,43 @@ def main():
         _owner_record_set(publish_hosts="%s,%s:%d" % (hosts, hosts, args.https_port), publish_users=user,
                           publish_tags=tags)
 
-    print("crew installer -> %s" % profile_home)
-    not_ready = []
-    for name, fn in steps:
-        status, detail = fn(True)
-        print("%s %s - %s" % (status, name, detail))
-        if status == "FAILED" and name in ("permissions", "parity"):
-            not_ready.append(name)
+    print("crew installer -> %s" % profile_home + ("" if LINEUP == "default" else " (lineup %s: %s)" % (
+        LINEUP, ", ".join(_writers()))))
+    not_ready, profiles_failed = [], ""
+    try:
+        for name, fn in steps:
+            status, detail = fn(True)
+            print("%s %s - %s" % (status, name, detail))
+            if status == "FAILED" and name in ("permissions", "parity", "profiles"):
+                not_ready.append(name)
+                if name == "profiles":
+                    profiles_failed = detail
+    except Exception as exc:
+        if stateful:
+            _lineup_state(status="failed", error="%s: %s" % (type(exc).__name__, exc))
+        raise
+    if uninstall:
+        left = _uninstall_leftovers(uninstall, args.profile_prefix, False)
+        if left:
+            print("FAILED uninstall-lineup - %s still there (see dropped-roles above); the build folder is kept so a "
+                  "re-run finishes it" % ", ".join(left))
+            not_ready.append("uninstall-lineup")
+        else:
+            _crew_lineup().remove_build(uninstall)
+            print("CHANGED uninstall-lineup - lineup %s uninstalled: %s; its lineup file stays at %s" % (
+                uninstall["name"], ", ".join(args.profile_prefix + r for r in uninstall["roles"]
+                                             if r not in ROLE_ORDER) or "no role profiles", uninstall["path"]))
+    if stateful:
+        missing = [] if args.no_profiles else [n for _r, n, home, _t in _role_plans(args.profile_prefix)
+                                                if not os.path.isdir(home)]
+        if missing:
+            _lineup_state(status="failed", error="role profile%s not created: %s" % (
+                "" if len(missing) == 1 else "s", ", ".join(missing)))
+            not_ready.append("profiles")
+        elif profiles_failed:
+            _lineup_state(status="failed", error=profiles_failed[-500:])
+        else:
+            _lineup_state(status="ready", error="")
     print("---")
     r = h(profile, "plugins", "doctor", "crew")
     print((r.stdout or "").strip())

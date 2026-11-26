@@ -275,7 +275,7 @@ def audit_outcome(conn, db, task, completed, now):
                 return "followup", dec, dec["followup"]
             return "settled", dec, ""
     role = (crew_card.field(task["body"], "Role") or "").strip().lower()
-    audited = (crew_card.needs_pass(task["body"]) and role in crew_card.WRITER_ROLES
+    audited = (crew_card.needs_pass(task["body"]) and role in crew_card.writer_roles()
                and bool(crew_card.close_proof_command(task["id"], db)))
     if audited and now - (completed["created_at"] or 0) <= AUDIT_GRACE_S:
         return "wait", None, ""

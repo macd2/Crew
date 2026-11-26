@@ -266,13 +266,13 @@ class PrefixSettingsTests(unittest.TestCase):
     def test_the_prefix_is_expanded_when_applied_and_when_checked(self):
         CI.PROFILE_PREFIX = "kc-"
         self.cfg.seed("p", kanban__orchestrator_profile="owner-chat", kanban__auto_decompose="true")
-        changed = CI._apply_settings("p", os.path.join(self.tpl, "settings.conf"))
+        changed = CI._apply_settings("p", os.path.join(self.tpl, "settings.conf"))[0]
         self.assertEqual(["kanban.auto_decompose", "kanban.orchestrator_profile"], changed)
         self.assertIn(("p", "config", "set", "kanban.orchestrator_profile", "kc-coordinator"), self.cfg.calls)
         self.assertEqual("kc-coordinator", CI._cfg("p", "kanban.orchestrator_profile"))
         self.assertEqual("false", CI._cfg("p", "kanban.auto_decompose"))
         self.assertEqual([], CI.settings_problems("p", "worker", self.tpl))
-        self.assertEqual([], CI._apply_settings("p", os.path.join(self.tpl, "settings.conf")), "second apply: no writes")
+        self.assertEqual([], CI._apply_settings("p", os.path.join(self.tpl, "settings.conf"))[0], "second apply: no writes")
 
     def test_a_home_on_another_prefix_is_a_finding(self):
         CI.PROFILE_PREFIX = "crew-"
@@ -360,7 +360,7 @@ class MenuPriorityTests(unittest.TestCase):
         cfg.seed("p", **{dotted + "_mode": "prepend", dotted: "[crew,crew-status,crew-run,crew-verify]"})
         status, detail = CI.step_menu_priority("p", False, True)
         self.assertEqual("CHANGED", status, detail)
-        self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-proof", "crew-diagnose"], CI.CREW_MENU_ORDER)
+        self.assertEqual(["crew", "crew-status", "crew-graph", "crew-stop", "crew-unstuck", "crew-safety", "crew-proof", "crew-lineup", "crew-diagnose"], CI.CREW_MENU_ORDER)
         self.assertFalse([c for c in cfg.calls if c[1:3] == ("config", "set")], "--check writes nothing")
         self.assertEqual("CHANGED", CI.step_menu_priority("p", True, True)[0])
         self.assertEqual("OK", CI.step_menu_priority("p", False, True)[0])

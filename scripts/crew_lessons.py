@@ -18,7 +18,7 @@ import re
 import sys
 import time
 
-ROLES = ("worker", "content", "verifier", "coordinator", "all")
+ROLES = ("worker", "content", "verifier", "coordinator", "all")   # the shipped crew: only a fallback; read known_roles()
 MAX_ENTRIES = 50
 MAX_BYTES = 8192
 MAX_TEXT = 400
@@ -27,10 +27,9 @@ HEADER = ("# crew lessons\n\nRecorded with the crew_lesson tool; injected into t
 ENTRY_RX = re.compile(r"^- (\d{4}-\d{2}-\d{2}) \[([a-z,]+)\] (.+)$")
 
 
-def _base_home():
-    """crew_card.base_home(), the one resolver (it knows Windows' %LOCALAPPDATA%\\hermes default). This module is
-    loaded by file path inside the Hermes process, so its siblings are not importable by name until the scripts
-    directory is on sys.path for the length of the import."""
+def _crew_card():
+    """The sibling crew_card module. This module is loaded by file path inside the Hermes process, so its siblings
+    are not importable by name until the scripts directory is on sys.path for the length of the import."""
     here = os.path.dirname(os.path.abspath(__file__))
     added = here not in sys.path
     if added:
@@ -40,7 +39,20 @@ def _base_home():
     finally:
         if added and here in sys.path:
             sys.path.remove(here)
-    return crew_card.base_home()
+    return crew_card
+
+
+def _base_home():
+    """crew_card.base_home(), the one resolver (it knows Windows' %LOCALAPPDATA%\\hermes default)."""
+    return _crew_card().base_home()
+
+
+def known_roles():
+    """Every role a lesson can name: the installed crew's roles (roles.json, read now) plus `all`."""
+    try:
+        return tuple(_crew_card().all_roles()) + ("all",)
+    except Exception:  # noqa: BLE001 - an unreadable crew falls back to the shipped one
+        return ROLES
 
 
 def path():
@@ -49,15 +61,16 @@ def path():
 
 def _parse_roles(roles):
     out = []
+    known = known_roles()
     for r in re.split(r"[,\s]+", (roles or "").lower()):
         if not r:
             continue
-        if r not in ROLES:
-            raise ValueError("unknown role %r (use: %s)" % (r, ", ".join(ROLES)))
+        if r not in known:
+            raise ValueError("unknown role %r (use: %s)" % (r, ", ".join(known)))
         if r not in out:
             out.append(r)
     if not out:
-        raise ValueError("--role is required (%s)" % ", ".join(ROLES))
+        raise ValueError("--role is required (%s)" % ", ".join(known))
     return ["all"] if "all" in out else out
 
 
@@ -119,7 +132,7 @@ def for_role(role):
 
 def block(role):
     """The <crew-lessons> context block for a role's turn; '' when none apply."""
-    texts = for_role(role) if role in ROLES else []
+    texts = for_role(role) if role in known_roles() else []
     if not texts:
         return ""
     return "<crew-lessons>\nLearned on earlier cards; apply them. Record a new one with " \

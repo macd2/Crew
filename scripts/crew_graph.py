@@ -635,7 +635,7 @@ def session_row_to_dict(row):
 
 # ----------------------------------------------------------------- roles
 
-ROLE_ORDER = ["coordinator", "worker", "content", "verifier"]
+ROLE_ORDER = ["coordinator", "worker", "content", "verifier"]   # the shipped crew: only a fallback, see role_order()
 ROLE_COLOURS = {
     "coordinator": "#a371f7",
     "worker": "#58a6ff",
@@ -696,7 +696,8 @@ def load_roles():
         if isinstance(r, dict) and r.get("name"):
             by_name[r["name"]] = r
     out = []
-    names = ROLE_ORDER + [n for n in by_name if n not in ROLE_ORDER]
+    order = role_order(data)
+    names = order + [n for n in by_name if n not in order]
     for name in names:
         r = by_name.get(name, {})
         out.append({
@@ -711,8 +712,23 @@ def load_roles():
     return out
 
 
+def role_order(data=None):
+    """The crew's roles in display order: coordinator, the writers (roles.json kind=writer, file order), verifier.
+    `data` is a parsed roles.json; None reads the installed one (crew_card.roles_defaults). The shipped crew when
+    it names no writer."""
+    if data is None:
+        data = crew_card.roles_defaults()
+    roles = data.get("roles") if isinstance(data, dict) else None
+    writers = []
+    for r in roles if isinstance(roles, list) else []:
+        name = str(r.get("name") or "").strip().lower() if isinstance(r, dict) else ""
+        if name and name not in writers and crew_card._role_kind(r) == "writer":
+            writers.append(name)
+    return ["coordinator"] + writers + ["verifier"] if writers else list(ROLE_ORDER)
+
+
 def card_role(body, skills_raw):
-    """Writer role of a card: the body's 'Role:' line, else a crew-role-* skill, else worker."""
+    """Writer role of a card: the body's 'Role:' line, else a crew-role-* skill, else the crew's first writer."""
     m = re.search(r"^\s*Role:\s*([A-Za-z]+)", body or "", re.M)
     if m:
         return m.group(1).lower()
@@ -723,7 +739,7 @@ def card_role(body, skills_raw):
     for s in skills if isinstance(skills, list) else []:
         if isinstance(s, str) and s.startswith("crew-role-"):
             return s[len("crew-role-"):]
-    return "worker"
+    return crew_card.default_writer()
 
 
 def body_field(body, key):
@@ -1257,7 +1273,7 @@ def profile_role(profile, fallback):
     """Role of a run from its profile: crew-<role> profiles map to <role>, anything else
     keeps the card's writer role."""
     p = (profile or "").strip().lower()
-    if p.startswith("crew-") and p[len("crew-"):] in ROLE_ORDER:
+    if p.startswith("crew-") and p[len("crew-"):] in set(ROLE_ORDER) | set(crew_card.all_roles()):
         return p[len("crew-"):]
     return fallback
 

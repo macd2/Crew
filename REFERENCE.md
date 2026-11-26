@@ -58,14 +58,19 @@ run at any time.
 - `--publish-tag TAGS`  tailnet device tags also let in, comma list (e.g. `tag:admin`); a tagged device has no login
 - `--no-profiles`   do not create/update the role profiles from `templates/`
 - `--profile-prefix P`  name prefix for the role profiles (default `crew-`, so `crew-worker`)
+- `--lineup NAME|PATH`  build the writer roles from a lineup (see "Lineups" below); `default` is the shipped
+                    crew. Omitted: the lineup recorded in `crew.lineup`, else default, so an update keeps it
+- `--uninstall-lineup NAME`  the reverse of `--lineup NAME`: its role profiles and their role skills are removed
+                    entirely and its build folder goes; if it was in force the crew is the default one again.
+                    The lineup file stays. Refused while a card assigned to one of its roles is open
 
 ## Commands
 
-Eight entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
+Nine entries. `/crew` and `/crew-diagnose` are agent turns (the `crew` and `crew-diagnose` skills): a plugin
 command's handler can only return text and cannot start a turn, so a pass that needs the model is a
-skill. `/crew-status`, `/crew-graph`, `/crew-stop`, `/crew-unstuck`, `/crew-safety` and
-`/crew-proof` are plugin commands, deterministic and free of any model call: the option is in the command
-name, so `/help` and the platform command menus list exactly these eight.
+skill. `/crew-status`, `/crew-graph`, `/crew-stop`, `/crew-unstuck`, `/crew-safety`, `/crew-proof` and
+`/crew-lineup` are plugin commands, deterministic and free of any model call: the option is in the command
+name, so `/help` and the platform command menus list exactly these nine.
 Everything else the owner once typed is gone: the coordinator loop heals, retries and asks, and the install
 and role checks are `python3 install.py --check [--profile NAME]` (`hermes plugins doctor crew` only validates
 that the plugin loads and registers; it reports nothing about roles, crons or profile drift).
@@ -107,6 +112,16 @@ that the plugin loads and registers; it reports nothing about roles, crons or pr
                            only route that records consent - the snapshot trusts a `proof_confirm` event with
                            `by=owner`, and only this command writes one, so a card's own run can never answer
                            its own proof question (the old `proof-answer` CLI is gone)
+- `/crew-lineup [use NAME | show NAME | add <url|path> | save NAME | default | uninstall NAME]`  no argument: the active lineup,
+                           its status (`<crew>/lineup.json`) and the lineups available. `use` switches in the
+                           background (the installer with `--lineup NAME`, log in `<crew>/lineup-install.log`),
+                           no ask; `show` prints every role, model, toolset and text; `add` fetches a lineup and
+                           its `_file` texts into `<crew>/lineups/.pending/` and shows them, saving nothing;
+                           `save` moves it into place, naming any file it overwrites; `default` goes back to
+                           worker + content; `uninstall NAME` shows what would go and, with `--yes`, runs the
+                           installer's `--uninstall-lineup NAME` in the background (the lineup file stays).
+                           `/crew --lineup NAME <ask>` (or `--lineup=NAME`) starts the same
+                           switch and runs the intake at once
 - `/crew-diagnose [state]`  the read-only pass (a skill, so it runs in this session's own turn): every
                            card sitting in that state (`blocked` when none is named) with its id, kind,
                            wait and reason, then how each would resume and who takes that step. It
@@ -237,6 +252,25 @@ refuses commands which write, move, delete, commit or send. `crew_card.py open` 
 the role's profile (`crew-worker`, `crew-content`) and falls back to the installing profile when
 that profile is absent.
 
+### Lineups
+
+A lineup (`crew-home/lineups/README.md`) is a JSON file of 1 to 12 writer roles that replace `worker` and `content`;
+`coordinator` and `verifier` are always there. User lineups live in `<crew>/lineups/<name>.json` (`<crew>` is
+`<base Hermes home>/crew/`). The package ships `security`, `design` and `pentest` in `crew-home/lineups/`, a
+mirror of `<crew>/`: the installer copies them into `<crew>/lineups/` (step `lineups`), never over a copy the
+owner edited, and updates an unedited copy when the package changes. A name is looked up in `<crew>/lineups/`
+first, then in the package's `crew-home/lineups/` (so `--lineup NAME` works before the first install).
+`scripts/crew_lineup.py` validates a lineup and builds it into `<crew>/lineup-build/<name>/`: a `roles/roles.json`
+with the core roles plus the lineup's writers, their briefs, `templates/profiles/<role>/` (SOUL.md and a
+settings.conf derived from the worker's) and `skills/crew-role-<role>/SKILL.md`; roles with no text of their own
+get it from `templates/lineup/`. The installer then takes roles, role templates and role skills from that
+overlay, records `crew.lineup` in the installing profile's config and the state in `<crew>/lineup.json`
+(`active`, `status` building / ready / failed, `error`, `roles`, `updated`, `source`). Owner overrides in
+`<Hermes home>/crew/templates/<role>/` still apply. A role profile crew created for a role the new lineup
+drops is removed, unless it has open cards: then it is kept and reported. `--check` only reports.
+
+    python3 scripts/crew_lineup.py list | show NAME | validate NAME | build NAME | state
+
 ## Layout
 
 ```
@@ -245,12 +279,16 @@ plugin.yaml            manifest v2 (five hooks: pre_tool_call, post_tool_call, p
 __init__.py            the plugin: one command per plugin option (/crew-status, /crew-graph, /crew-stop),
                        role guards (budget, verifier read-only)
 templates/profiles/    one editable directory per role: SOUL.md + settings.conf
+templates/lineup/      SOUL.md, brief.md, skill.md: the generic texts for a lineup role without its own;
+                       writer-rules.md: crew's mandatory writer rules, always part of a lineup role's skill
+crew-home/lineups/     shipped lineups (security, design, pentest) the installer copies into <crew>/lineups/, and the format
 roles/roles.json       the roles: coordinator, worker, content, verifier
 roles/briefs/*.md      one short contract brief per role
 skills/crew/           the intake skill behind /crew
 skills/crew-verifier/  verification checklist skill
 skills/crew-role-worker/ + crew-role-content/  what a writer card is forced to load
 scripts/crew_tools.py  the `crew` toolset the roles call: crew_verdict, crew_progress, crew_proof_check, crew_lesson, crew_plan, crew_diagnose
+scripts/crew_lineup.py  lineups: find, validate, preview, fetch/save, build the overlay, the lineup.json state
 scripts/crew_card.py   open a card from a contract, plan a parent with child cards, run a verdict
 scripts/crew_coordinator.py    the coordinator loop: one pass per dispatch tick over the board's events (heal, decide, ask the owner)
 scripts/crew_heal.py           the mechanical remedies the loop calls first (a library; no command of its own)
@@ -308,7 +346,7 @@ systemctl --user disable --now crew-graph-http.service
 rm -f ~/.config/systemd/user/crew-graph-http.service
 ```
 
-(or `hermes -p NAME config unset crew.roles_path crew.source_dir` to drop the recorded keys; for the default
+(or `hermes -p NAME config unset crew.roles_path crew.source_dir crew.lineup` to drop the recorded keys; for the default
 profile use `~/.hermes/` in place of `~/.hermes/profiles/NAME/`).
 
 ## Repo conventions

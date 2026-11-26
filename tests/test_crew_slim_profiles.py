@@ -202,11 +202,11 @@ class SettingsTests(unittest.TestCase):
         cfg.seed("p", platform_toolsets__cli="[browser,kanban,web]", platform_toolsets__slack="[]",
                  agent__max_turns="150")
         conf = REPO / "templates" / "profiles" / "worker" / "settings.conf"
-        changed = CI._apply_settings("p", str(conf))
+        changed = CI._apply_settings("p", str(conf))[0]
         self.assertIn("platform_toolsets.cli", changed)
         self.assertEqual("[terminal,file,web,kanban,crew]", CI._cfg("p", "platform_toolsets.cli"))
         self.assertEqual("[]", CI._cfg("p", "platform_toolsets.slack"))
-        self.assertEqual([], CI._apply_settings("p", str(conf)), "applying twice must change nothing")
+        self.assertEqual([], CI._apply_settings("p", str(conf))[0], "applying twice must change nothing")
         self.assertEqual([], CI.settings_problems("p", "worker", str(conf.parent)))
 
 

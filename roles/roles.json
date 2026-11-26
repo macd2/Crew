@@ -2,6 +2,8 @@
   "roles": [
     {
       "name": "coordinator",
+      "kind": "coordinator",
+      "task_class": "coordinator",
       "purpose": "Owns every open card: heals, retries, rescopes, splits or asks the owner one question; intake and contract first.",
       "artifact": "the card and its verdict log",
       "proof": "card contract plus verdict log",
@@ -15,6 +17,8 @@
     },
     {
       "name": "worker",
+      "kind": "writer",
+      "task_class": "code",
       "purpose": "Code, config, infra and web work; exactly one writer per card.",
       "artifact": "files, test output, live page",
       "proof": "files, test output, live page",
@@ -29,6 +33,8 @@
     },
     {
       "name": "content",
+      "kind": "writer",
+      "task_class": "write",
       "purpose": "Posts, reports, video, pages and all social channels.",
       "artifact": "rendered artifact plus raw source",
       "proof": "rendered artifact plus raw source",
@@ -43,6 +49,8 @@
     },
     {
       "name": "verifier",
+      "kind": "verifier",
+      "task_class": "review",
       "purpose": "Independent verification: runs the proof itself, never trusts the writer.",
       "artifact": "command output, file readback, page state",
       "proof": "command output, file readback, page state",

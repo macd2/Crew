@@ -172,7 +172,9 @@ SCHEMAS = {
     "crew_lesson": {
         "name": "crew_lesson",
         "description": "Record one short lesson for a crew role; an agent may not write lessons for the role `all`.",
-        "parameters": _obj({"role": {"type": "string", "description": "worker, content, verifier, coordinator"},
+        "parameters": _obj({"role": {"type": "string", "description": "coordinator, verifier or one of the "
+                                                                    "crew's writer roles (default crew: worker, "
+                                                                    "content)"},
                                 "text": {"type": "string", "description": "one or two lines"}}, ["role", "text"])},
     "crew_plan": {
         "name": "crew_plan",

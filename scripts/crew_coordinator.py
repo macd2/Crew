@@ -839,7 +839,7 @@ def audit_proof(ctx, card, event):
     MAX_AUDIT_FOLLOWUPS at most, then the owner is asked). Plan machinery (the coordinator's own cards) is not audited.
     Every outcome is an `audit` crew_decision carrying the event id, which is what makes the audit run once."""
     body = card.get("body") or ""
-    if (crew_card.field(body, "Role") or "").strip().lower() not in crew_card.WRITER_ROLES:
+    if (crew_card.field(body, "Role") or "").strip().lower() not in crew_card.writer_roles():
         return {"detail": "completed: no proof to audit"}
     cmd = crew_card.close_proof_command(card["id"])
     if not cmd:

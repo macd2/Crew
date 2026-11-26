@@ -304,6 +304,14 @@ print("@@RESULT@@" + json.dumps(out))
 """
 
 
+def posix_path(p):
+    """C:\\Users\\x or /c/Users/x -> /c/users/x style, so a Git Bash path and a Windows path compare."""
+    p = p.replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        p = "/" + p[0].lower() + p[2:]
+    return p
+
+
 def path_without_python():
     """PATH minus every directory that provides python3 / python / py (setup-python's, the Windows Store stubs')."""
     names = ("python3", "python", "py", "python3.exe", "python.exe", "py.exe")
@@ -330,7 +338,7 @@ def step_agent_commands(c):
     check(watch is not None, "crew/SKILL.md gives the background watcher command")
     card = c.card_id or open(os.path.join(c.home, "e2e-card-id.txt"), encoding="utf-8").read().strip()
     # --lifetime 1 makes the watcher give up after a second ("still running") instead of waiting for the card to end
-    cmds = ["command -v python3 python py >/dev/null 2>&1 && echo PYTHON3-IS-ON-PATH || echo no-python3-on-path",
+    cmds = ['for n in python3 python py; do command -v "$n"; done; echo @@PYEND',
             watch.group(1).replace("<id>", card) + " --lifetime 1"]
     # the owner's CLI: still there, still answers the same way
     cli = 'sh "$HERMES_HOME/plugins/crew/scripts/crew-run.sh" crew_card.py '
@@ -342,11 +350,16 @@ def step_agent_commands(c):
     body = (done.stdout or "")
     check("@@RESULT@@" in body, "Hermes's terminal environment ran the commands (rc=%s %s)" % (done.returncode, (done.stderr or "")[-300:]))
     res = json.loads(body.split("@@RESULT@@", 1)[1])
-    probe = res[0]["out"].strip().splitlines()[-1]
+    found = [ln.strip() for ln in res[0]["out"].split("@@PYEND")[0].splitlines() if ln.strip()]
     if IS_WINDOWS:
-        check(probe == "no-python3-on-path", "inside the agent terminal: python3 / python / py are not on PATH (%s)" % probe)
+        # The point: an agent never depends on a system Python. Newer Hermes (0.23.x) puts the Python it ships itself
+        # (<home>\tools\python-*) on its terminal PATH; that one is Hermes's own and allowed. Anything else fails.
+        own = posix_path(os.path.join(c.home, "tools")).lower().rstrip("/") + "/"
+        foreign = [p for p in found if not posix_path(p).lower().startswith(own)]
+        check(not foreign, "inside the agent terminal: no python3 / python / py on PATH except Hermes's own "
+              "(found: %s)" % (found or "none"))
     else:
-        say("    info: PATH check inside the agent terminal on this host: %s" % probe)
+        say("    info: python on PATH inside the agent terminal on this host: %s" % (found or "none"))
     for r in res[1:]:
         say("    $ %s\n      rc=%s\n%s" % (r["cmd"][:150], r["rc"], "\n".join("      | " + ln for ln in r["out"].strip().splitlines()[-6:])))
     wout = res[1]["out"]

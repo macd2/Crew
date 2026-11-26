@@ -74,6 +74,7 @@ def shipped_files(package, mod=None):
         spec = importlib.util.spec_from_file_location("crew_install", os.path.join(package, "install.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        _use_active_lineup(mod)
     out = []
     # PLUGIN_FILES carries the scripts too (plugins/crew/scripts/...): nothing crew runs lives in <profile>/scripts.
     for rel in getattr(mod, "PLUGIN_FILES", []):
@@ -85,6 +86,30 @@ def shipped_files(package, mod=None):
     for name in getattr(mod, "skill_names", lambda: [])():
         out.append(("skills/%s/SKILL.md" % name, "skills/crew/%s/SKILL.md" % name))
     return out
+
+
+def _use_active_lineup(mod):
+    """Run on its own (the nightly), put the installed lineup in force in the installer module, so the role files are
+    compared against that lineup's overlay rather than the shipped crew. The overlay is built into a throwaway dir."""
+    try:
+        import crew_lineup
+        state = crew_lineup.read_state() or {}
+    except Exception:
+        return
+    active = str(state.get("source") or state.get("active") or "").strip()
+    if not active or active == "default" or state.get("status") == "failed" or not hasattr(mod, "_select_lineup"):
+        return
+    err = mod._select_lineup(active, True)
+    if err:
+        print("lineup %s not usable for the comparison: %s" % (active, err), file=sys.stderr)
+
+
+def _source(package, rel, mod):
+    """Where a shipped file comes from: the installer's own lookup (the lineup overlay for role files), else the package."""
+    src = getattr(mod, "_src", None) if mod is not None else None
+    if src is not None and getattr(mod, "LINEUP_DIR", None):
+        return src(rel)
+    return os.path.join(package, rel)
 
 
 def md5(path):
@@ -108,8 +133,14 @@ def compare(package, profiles, skip=(), mod=None):
     """Every shipped file against its copy in each (name, root) profile: {pairs, mismatches, missing, skipped, detail}."""
     pairs = mismatches = missing = skipped = 0
     detail = []
+    if mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("crew_install", os.path.join(package, "install.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _use_active_lineup(mod)
     for rel, target in shipped_files(package, mod):
-        src = os.path.join(package, rel)
+        src = _source(package, rel, mod)
         if not os.path.isfile(src):
             missing += 1
             detail.append({"file": rel, "problem": "not in the package"})
