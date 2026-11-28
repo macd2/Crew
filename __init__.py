@@ -1224,7 +1224,8 @@ def _close_guard(tool_name, args):
     return {"action": "block",
             "message": "crew close rule: card %s cannot be completed - %s. The card is done only when its proof "
                        "command has a PASS line in the verdict log; the owner can override from the CLI "
-                       "(hermes kanban complete --force)." % (card, why)}
+                       "(hermes kanban complete --force). Valid now: crew_verdict(card=\"%s\"), then kanban_complete "
+                       "task_id=%s; or kanban_block task_id=%s." % (card, why, card, card, card)}
 
 
 def _review_guard(tool_name, args):
@@ -1651,12 +1652,28 @@ def _lineup_wait(tool, args):
 
 
 def _cmd_lineup(rest=""):
-    """/crew-lineup [use NAME | default | show NAME | add <url|path> | save NAME | uninstall NAME [--yes]]."""
+    """/crew-lineup [use NAME | default | show NAME | add <https-url|path> | save NAME [--allow X ...] |
+    uninstall NAME [--yes]]. --allow names what a lineup fetched from a URL needs confirmed (a base_url host, a
+    profile other than the owner's)."""
     words = (rest or "").split()
     sub = words[0].lower() if words else ""
     yes = sub == "uninstall" and "--yes" in words[1:]
-    arg = " ".join(w for w in words[1:] if not (yes and w == "--yes")).strip()
-    usage = ("usage: /crew-lineup [use NAME | default | show NAME | add <url|path> | save NAME | "
+    allow, kept = [], []
+    rest_words = words[1:]
+    i = 0
+    while i < len(rest_words):
+        w = rest_words[i]
+        if sub == "save" and w == "--allow" and i + 1 < len(rest_words):
+            allow.append(rest_words[i + 1])
+            i += 2
+            continue
+        if sub == "save" and w.startswith("--allow="):
+            allow.append(w.split("=", 1)[1])
+        elif not (yes and w == "--yes"):
+            kept.append(w)
+        i += 1
+    arg = " ".join(kept).strip()
+    usage = ("usage: /crew-lineup [use NAME | default | show NAME | add <https-url|path> | save NAME [--allow X ...] | "
              "uninstall NAME [--yes]]")
     lu = _lineup_tool()
     if lu is None:
@@ -1679,7 +1696,7 @@ def _cmd_lineup(rest=""):
             name, text = lu.fetch(arg)
             return ("%s\n\nNothing saved yet; run /crew-lineup save %s to keep it." % (str(text).rstrip(), name))
         if sub == "save" and arg:
-            got = lu.commit_pending(arg)
+            got = lu.commit_pending(arg, allow=allow)
             return _saved_text(arg, got)
         if sub == "uninstall" and arg:
             return _lineup_uninstall(lu, arg, yes)

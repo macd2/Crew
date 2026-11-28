@@ -56,6 +56,8 @@ import git_safe  # noqa: E402
 LIVE = {
     "crew_panel_click_check.py": "drives the desktop panel",
     "crew_entry_proof.py": "needs the live registry and a chat turn",
+    "crew_panel_steps_proof.py": "needs the live crew graph server (127.0.0.1:8799)",
+    "crew_role_platforms_proof.py": "needs a running hermes-gateway.service",
 }
 
 # Proofs whose subject IS a live service reading the live board (the gateway)
@@ -90,6 +92,16 @@ NEEDS_ARGS = {"crew_graph_flow_check.py": "--card <id> [--package <path>]"}
 # Every proof that takes --card gets the runner's --card (issue #15 follow-up: `--all --card X` started
 # crew_panel_click_check.py without it, so it died on argparse instead of checking the panel).
 CARD_ARGS = set(NEEDS_ARGS) | {"crew_panel_click_check.py"}
+# Proofs that run a real model turn. On a Hermes that has never run one (no state.db in the owner profile: a
+# fresh install, the release gate's throwaway home, CI) there is no model to drive, so they are held back with
+# that reason instead of failing on "no state.db". Wherever a turn has run (every nightly), they run.
+NEEDS_MODEL = {"crew_intake_proof.py": "runs a real /crew turn; this Hermes has never run one (no state.db, "
+                                      "no working model)"}
+
+
+def model_has_run():
+    import crew_card
+    return os.path.exists(os.path.join(crew_card.owner_home(), "state.db"))
 
 
 def candidates():
@@ -138,6 +150,9 @@ def choose(args):
             continue
         if name in LIVE and not args.all:
             skipped.append({"file": name, "why": LIVE[name]})
+            continue
+        if name in NEEDS_MODEL and not args.all and not model_has_run():
+            skipped.append({"file": name, "why": NEEDS_MODEL[name]})
             continue
         picked.append(name)
     return picked, skipped

@@ -5,7 +5,7 @@
 **You ask once. A coordinator owns the card until its proof passes.**
 
 [![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-3fb950?style=flat-square)](https://github.com/NousResearch/hermes-agent)
-[![Version](https://img.shields.io/badge/version-0.11.0-3fb950?style=flat-square)](plugin.yaml)
+[![Version](https://img.shields.io/badge/version-0.11.1-3fb950?style=flat-square)](plugin.yaml)
 [![tests](https://github.com/macd2/Crew/actions/workflows/tests.yml/badge.svg)](https://github.com/macd2/Crew/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -33,6 +33,17 @@ hands the card to a **coordinator** that owns it until the proof command exits 0
 result back in the same chat, or one concrete question when it truly needs you.
 
 [![The crew dashboard: a card's graph with its running worker selected and the live transcript](assets/dashboard.webp)](https://crew.forgecoreai.com)
+
+## What's new in 0.11.1
+
+- **Lineups are safer to install and to save.** A role that inherits credentials is now a real profile clone
+  (`hermes profile create --clone-from`), with memories and plugins pruned. The preview shows each role's
+  model, provider and base_url and every path `save` would write; `save` writes only the lineup's own folder and
+  asks for `--allow` when a URL lineup points a base_url at another host or inherits from a non-owner profile.
+  Remote lineups load over https only.
+- **Proofs pass on a fresh install.** Release and CI now install the shipped tree into a throwaway home and run
+  every proof there; a failing proof blocks the release.
+- **Briefs** carry a no-praise line, the hand-off is labelled as history, and the close rule names the valid next calls.
 
 ## What's new in 0.11.0
 
@@ -344,7 +355,7 @@ regression test each, and a `hardener` for config and dependencies.
 ```
 
 The lineup is set up in the background (one Hermes profile per role) while the intake runs. `/crew-lineup`
-shows the active lineup and the ones you can use; `/crew-lineup add <url|path>` shows everything in a lineup
+shows the active lineup and the ones you can use; `/crew-lineup add <https-url|path>` shows everything in a lineup
 before `/crew-lineup save NAME` keeps it; `python3 install.py --profile NAME --lineup security` does the same
 from the installer. Crew ships three: `security`, `design` and `pentest`. Your own lineups live in
 `<Hermes home>/crew/lineups/`. A lineup's roles run with the same

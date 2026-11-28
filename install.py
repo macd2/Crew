@@ -1792,13 +1792,31 @@ def _role_plans(profile):
 
 
 # ---------------------------------------------------------------- what a role profile inherits
-# A role profile is created bare and gets exactly what its settings.conf `inherit.*` lines say (_inherit): env = the
-# .env and the credential sections (ENV_SECTIONS) of a profile, hooks = its config.yaml hooks section, mcp = its
-# mcp_servers (or the named servers of the installing profile). Skills are step_role_skills's part (_skill_pairs).
-# A section is replaced whole with `hermes config set --force`; the .env is copied as a file (Hermes has no writer that
-# takes a whole .env), owner-only.
+# A role profile gets what its settings.conf `inherit.*` lines say (_inherit). Credentials (env = the .env and the
+# credential sections ENV_SECTIONS of config.yaml) are never read or copied by crew: a role whose inherit.env names a
+# profile is created with Hermes's own `hermes profile create --clone-from <that profile>`, which owns them, and crew
+# then prunes what the role must not keep (its skills, memories, the hooks and MCP servers its inherit lines leave
+# out); a role with inherit.env = false is created bare. Hermes copies credentials only at create time, so the profile a
+# role was cloned from is recorded (env_from in its crew record) and a later inherit.env naming another profile is
+# reported, not patched over. hooks = a profile's config.yaml hooks section, mcp = its mcp_servers (or the named
+# servers); a section is replaced whole with `hermes config set --force`. Skills are step_role_skills's part.
 
 NO_ENV_TEXT = "# crew: this role profile inherits no credentials (inherit.env = false in its settings.conf).\n"
+# What a clone carries that a role never keeps: the source's curated memory (the role has its own SOUL.md and brief).
+CLONE_PRUNE = (os.path.join("memories", "MEMORY.md"), os.path.join("memories", "USER.md"))
+
+
+def env_source(tpl, source_profile):
+    """The profile a role's credentials come from (its inherit.env, "owner" = the installing profile), or False."""
+    value = _inherit(tpl)[0]["env"]
+    return False if value is False else (source_profile if value == "owner" else value)
+
+
+def _has_section(profile, key):
+    """A config.yaml section of a role profile is set and non-empty, asked through `hermes config get` (which masks
+    secrets); its value is never read by crew."""
+    r = h(profile, "config", "get", key)
+    return r.returncode == 0 and (r.stdout or "").strip() not in ("", "{}", "[]", "null", "None")
 
 
 def _env_lines(text):
@@ -1825,19 +1843,19 @@ def inherit_plan(name, home, tpl, source_profile):
         return prof
 
     want = {}
-    cur_env = Path(home, ".env").read_text(encoding="utf-8") if os.path.isfile(os.path.join(home, ".env")) else ""
     if inh["env"]:
         prof = source("env")
-        if prof is not None:
-            path = os.path.join(resolve_profile_home(prof), ".env")
-            text = Path(path).read_text(encoding="utf-8") if os.path.isfile(path) else ""
-            if _env_lines(text) != _env_lines(cur_env):
-                plan["env"] = text if _env_lines(text) else NO_ENV_TEXT
-            want.update(_sections(prof, ENV_SECTIONS))
+        had = _shipped_record(home).get("env_from")
+        if prof is not None and had is not None and had != prof:
+            plan["problems"].append(
+                "inherit.env: names %r but this role profile was %s; Hermes copies credentials only when it creates a "
+                "profile, so remove it (hermes profile delete %s) and install again to clone it from %r" % (
+                    prof, ("cloned from %r" % had) if had else "created without credentials", name, prof))
     else:
+        cur_env = Path(home, ".env").read_text(encoding="utf-8") if os.path.isfile(os.path.join(home, ".env")) else ""
         if _env_lines(cur_env):
             plan["env"] = NO_ENV_TEXT
-        want.update({k: None for k in ENV_SECTIONS})
+        plan["sections"] += [(k, {}) for k in ENV_SECTIONS if _has_section(name, k)]
     if inh["hooks"]:
         prof = source("hooks")
         if prof is not None:
@@ -1852,14 +1870,14 @@ def inherit_plan(name, home, tpl, source_profile):
         if not bad:
             want["mcp_servers"] = {n: cfg for n, (_prof, cfg) in got.items()}
     cur = _sections(name, list(want))
-    plan["sections"] = [(k, v if v is not None else {}) for k, v in want.items() if not _same_section(cur.get(k), v)]
+    plan["sections"] += [(k, v if v is not None else {}) for k, v in want.items() if not _same_section(cur.get(k), v)]
     return plan
 
 
 def inherit_problems(name, home, tpl, source_profile):
     """inherit_plan as settings_problems-style lines ([] when the role profile has what its inherit lines say)."""
     plan = inherit_plan(name, home, tpl, source_profile)
-    return (["inherit.env: .env differs from its source"] if plan["env"] is not None else []) \
+    return (["inherit.env = false: the .env still holds credentials"] if plan["env"] is not None else []) \
         + ["%s differs from what inherit says" % k for k, _v in plan["sections"]] + plan["problems"]
 
 
@@ -1950,12 +1968,33 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
     done, failures = [], []
     for role, name, home, tpl, existed in todo:
         if not os.path.isdir(home):
-            # Bare: no clone, no bundled skills - the least Hermes's `profile create` copies (a fresh config.yaml with
-            # the active profile's model block, an empty .env, the opt-out marker). What the role takes from the owner
-            # or another profile is what its inherit lines say (apply_inherit, step_role_skills), nothing else.
-            r = h(source_profile, "profile", "create", name, "--no-skills", "--description", ROLE_DESCS.get(role, ""))
+            # inherit.env names a profile: Hermes's own clone carries its credentials (.env, secrets/vault/providers),
+            # crew never reads or copies them; what the role must not keep is pruned below and by apply_inherit and
+            # step_role_skills. inherit.env = false: bare, no bundled skills, an empty .env.
+            env_from = env_source(tpl, source_profile)
+            if env_from:
+                r = h(source_profile, "profile", "create", name, "--clone-from", env_from,
+                      "--description", ROLE_DESCS.get(role, ""))
+            else:
+                r = h(source_profile, "profile", "create", name, "--no-skills", "--description", ROLE_DESCS.get(role, ""))
             if r.returncode != 0:
                 print("  profile create %s failed: %s" % (name, _set_failed(r)))
+            elif os.path.isdir(home):
+                for rel in CLONE_PRUNE:
+                    if os.path.isfile(os.path.join(home, rel)):
+                        os.remove(os.path.join(home, rel))
+                # The clone also carries the source's plugins (code + plugins.enabled): a role runs crew only.
+                if env_from:
+                    pdir = os.path.join(home, "plugins")
+                    for entry in (os.listdir(pdir) if os.path.isdir(pdir) else []):
+                        if entry == "crew" or entry.startswith("."):
+                            continue
+                        path = os.path.join(pdir, entry)
+                        if os.path.islink(path) or os.path.isfile(path):
+                            os.remove(path)
+                        else:
+                            shutil.rmtree(path)
+                    _section_set(name, "plugins.enabled", [])
         if not os.path.isdir(home):
             done.append("%s FAILED" % name)
             failures.append("%s: profile create failed" % name)
@@ -1983,6 +2022,8 @@ def step_profiles(source_profile, prefix, apply, no_profiles=False):
             keys += ["inherit " + k for k in got]
             failed += bad
         rec["settings"] = keys
+        if not existed:
+            rec["env_from"] = env_from
         rec["role"] = role
         rec["kind"] = ROLE_KINDS.get(role, "")
         rec["provisioned"] = provisioned

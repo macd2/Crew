@@ -112,7 +112,7 @@ that the plugin loads and registers; it reports nothing about roles, crons or pr
                            only route that records consent - the snapshot trusts a `proof_confirm` event with
                            `by=owner`, and only this command writes one, so a card's own run can never answer
                            its own proof question (the old `proof-answer` CLI is gone)
-- `/crew-lineup [use NAME | show NAME | add <url|path> | save NAME | default | uninstall NAME]`  no argument: the active lineup,
+- `/crew-lineup [use NAME | show NAME | add <https-url|path> | save NAME [--allow X] | default | uninstall NAME]`  no argument: the active lineup,
                            its status (`<crew>/lineup.json`) and the lineups available. `use` switches in the
                            background (the installer with `--lineup NAME`, log in `<crew>/lineup-install.log`),
                            no ask; `show` prints every role, model, toolset and text; `add` fetches a lineup and

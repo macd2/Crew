@@ -6,7 +6,8 @@ A lineup lives at <crew folder>/lineups/<name>.json; the package ships its own i
 (the installer copies them into <crew folder>/lineups/), and a name falls back to those. build() turns one into an overlay at
 <crew folder>/lineup-build/<name>/ holding the roles.json, briefs, profile templates and role skills the
 installer then uses instead of the shipped ones.
-`*_file` keys are paths relative to the crew folder only (<base Hermes home>/crew).
+`*_file` keys are relative paths: looked up in the lineup's own folder <crew folder>/lineups/<name>/files/ (where `save`
+writes a fetched lineup's texts), then in the crew folder (<base Hermes home>/crew). A fetched lineup is https only.
 
 Run:  python3 crew_lineup.py {list | show NAME | validate NAME | build NAME | state}
 """
@@ -442,6 +443,23 @@ def conf_inherit(pairs, exists, where="settings.conf"):
     return out, errs
 
 
+def files_dir(lineup_json):
+    """The lineup-owned folder its saved *_file texts live in: <dir of the json>/<name>/files/. `save` writes only
+    there, never anywhere else under the crew folder (owner.json, lessons.md, safety-approvals.json are crew's)."""
+    stem = os.path.splitext(os.path.basename(lineup_json))[0]
+    return os.path.join(os.path.dirname(lineup_json), stem, "files")
+
+
+def _read_rel_any(roots, path):
+    """_read_rel over several roots, the first that has the file; the last error when none has."""
+    err = ""
+    for root in roots:
+        text, err = _read_rel(root, path)
+        if not err:
+            return text, ""
+    return None, err
+
+
 def _validate(data, default_name, files_root, sources=None):
     """(normalized dict, [problems])."""
     errs = []
@@ -553,7 +571,7 @@ def _validate(data, default_name, files_root, sources=None):
             parts = []
             fk = t + "_file"
             if fk in r:
-                text, err = _read_rel(files_root, r[fk])
+                text, err = _read_rel_any(files_root if isinstance(files_root, (list, tuple)) else [files_root], r[fk])
                 if err:
                     errs.append("%s: %s %r: %s" % (label, fk, r[fk], err))
                 elif text.strip():
@@ -579,7 +597,8 @@ def _load(path, files_root=None, name=None, sources=None):
     stem = os.path.splitext(os.path.basename(path))[0]
     if name and isinstance(data, dict):
         data = dict(data, name=name)
-    out, errs = _validate(data, stem, files_root or crew_dir(), sources)
+    # A saved lineup's texts: its own files folder first, then the crew folder (texts the owner keeps there by hand).
+    out, errs = _validate(data, stem, files_root or [files_dir(path), crew_dir()], sources)
     if errs:
         raise LineupError("lineup %s has %d problem(s):\n" % (path, len(errs)) + "\n".join("- " + e for e in errs))
     out["source"] = path
@@ -733,13 +752,14 @@ def _preview(lu):
              "Source: %s" % lu.get("source", ""),
              "Writer roles (%d), plus the shipped coordinator and verifier:" % len(lu["roles"])]
     for r in lu["roles"]:
-        model = r.get("model") or "(template default)"
-        if r.get("provider"):
-            model += " via " + r["provider"]
         lines += ["", "== %s: %s" % (r["name"], r["purpose"]),
-                  "task_class %s | model %s | toolsets %s | budget %s tokens%s" % (
-                      r["task_class"], model, ",".join(r["tools"]), r["budget_tokens"],
+                  "task_class %s | toolsets %s | budget %s tokens%s" % (
+                      r["task_class"], ",".join(r["tools"]), r["budget_tokens"],
                       (" | max_turns %d" % r["max_turns"]) if r.get("max_turns") else ""),
+                  # Where the role's prompts (and, with inherit.env, the credentials it holds) go: always shown.
+                  "model: %s | provider: %s | base_url: %s" % (
+                      r.get("model") or "(template default)", r.get("provider") or "(template default)",
+                      r.get("base_url") or "(none: the provider's own endpoint)"),
                   "artifact: %s" % r["artifact"], "proof: %s" % r["proof"]]
         if r["skills_extra"]:
             lines.append("skills_extra: %s" % ", ".join(r["skills_extra"]))
@@ -785,14 +805,31 @@ def write_state(**fields):
 # ---------------------------------------------------------------- fetch / commit
 
 def _is_url(s):
-    return bool(re.match(r"^https?://", s or "", re.I))
+    """Anything with a URL scheme (so http:// is refused by name, not read as a local path)."""
+    return bool(re.match(r"^[a-z][a-z0-9+.-]*://", s or "", re.I))
+
+
+def _is_https(s):
+    return bool(re.match(r"^https://[^/\s]+", s or "", re.I))
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is followed only to another https:// URL (https -> http would undo the https rule)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_https(newurl):
+            raise LineupError("%s redirects to %s: only https:// is fetched" % (req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _http_get(url, limit):
+    if not _is_https(url):
+        raise LineupError("%s: only https:// lineups are fetched" % url)
     req = urllib.request.Request(url, headers={"User-Agent": "crew-lineup"})
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+        with urllib.request.build_opener(_HttpsOnlyRedirects).open(req, timeout=FETCH_TIMEOUT) as resp:
             data = resp.read(limit + 1)
+    except LineupError:
+        raise
     except Exception as e:
         raise LineupError("cannot fetch %s: %s" % (url, e))
     if len(data) > limit:
@@ -804,12 +841,59 @@ def _pending_dir(name):
     return os.path.join(crew_dir(), "lineups", ".pending", name)
 
 
+FETCH_META = "fetch.json"
+
+
+def needs_confirmation(lu):
+    """What a lineup fetched from a URL may not bring in unseen: [(token, why)]. A role's base_url (card prompts, and
+    with inherit.env the owner's provider key, go to that host) - token = the host; an inherit source other than the
+    owner profile (another local profile's credentials, hooks, skills or MCP servers) - token = the profile name.
+    `save NAME --allow TOKEN` per token is the owner confirming it by name."""
+    out = {}
+
+    def note(token, why):
+        out.setdefault(token, [])
+        if why not in out[token]:
+            out[token].append(why)
+
+    for r in lu["roles"]:
+        if r.get("base_url"):
+            host = urllib.parse.urlparse(r["base_url"]).hostname or r["base_url"]
+            note(host, "role %s: base_url %s" % (r["name"], r["base_url"]))
+        for k in INHERIT_KEYS:
+            v = r["inherit"][k]
+            if v is False:
+                continue
+            if isinstance(v, str):
+                profs = [v]
+            elif isinstance(v, list):
+                profs = [_set_item(k, x)[0] for x in v]
+            else:
+                profs = [v.get("from") or "owner"] + [_set_item(k, x)[0] for x in v.get("add", [])]
+            for p in profs:
+                if p and p != "owner":
+                    note(p, "role %s: inherit.%s from profile %s" % (r["name"], k, p))
+    return [(t, "; ".join(w)) for t, w in out.items()]
+
+
+def _save_targets(name, rels):
+    """[(path save writes, it exists now)]: the lineup json and each text under the lineup's own files folder."""
+    jpath = os.path.join(crew_dir(), "lineups", name + ".json")
+    fdir = files_dir(jpath)
+    paths = [jpath] + [os.path.join(fdir, os.path.normpath(r.replace("\\", "/"))) for r in rels]
+    return [(p, os.path.exists(p)) for p in paths]
+
+
 def fetch(src, dest_name=None):
     """Stage a lineup from an http(s) URL or a local path into <crew>/lineups/.pending/<name>/ (the json as
     <name>.json, every *_file under files/<relative path>). *_file entries come from the source's directory + the
     same relative path (for a local file in a `lineups/` folder, also from that folder's parent, the crew layout).
-    Nothing outside .pending is written. Returns (name, preview_text)."""
+    Nothing outside .pending is written. Returns (name, preview_text); the text ends with the paths `save` writes and,
+    for a URL, what the owner has to confirm by name at save (needs_confirmation).
+    Only https:// URLs are fetched."""
     src = str(src or "").strip()
+    if _is_url(src) and not _is_https(src):
+        raise LineupError("%s: only https:// lineups are fetched" % src)
     if _is_url(src):
         raw = _http_get(src, MAX_JSON)
         stem = os.path.splitext(os.path.basename(urllib.parse.urlparse(src).path))[0]
@@ -855,7 +939,10 @@ def fetch(src, dest_name=None):
         for rel in rels:
             relp = os.path.normpath(rel.replace("\\", "/"))
             if _is_url(src):
-                blob = _http_get(urllib.parse.urljoin(src, rel.replace("\\", "/")), MAX_FILE)
+                url = urllib.parse.urljoin(src, rel.replace("\\", "/"))
+                if urllib.parse.urlparse(url).netloc != urllib.parse.urlparse(src).netloc:
+                    raise LineupError("%s: leaves %s" % (rel, urllib.parse.urlparse(src).netloc))
+                blob = _http_get(url, MAX_FILE)
             else:
                 blob = None
                 roots = [os.path.dirname(path)]
@@ -879,37 +966,60 @@ def fetch(src, dest_name=None):
             json.dump(data, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
         lu = _load(jpath, files_root=files)
+        confirm = needs_confirmation(lu) if _is_url(src) else []
+        with open(os.path.join(stage, FETCH_META), "w", encoding="utf-8") as fh:
+            json.dump({"source": src, "confirm": [t for t, _w in confirm]}, fh, indent=2)
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
     lu["source"] = src
-    return name, _preview(lu)
+    lines = ["", "save writes (nothing outside the lineup's own file and folder):"]
+    lines += ["  %s%s" % (p, " (replaces the one there)" if there else "") for p, there in _save_targets(name, rels)]
+    if confirm:
+        lines += ["", "This lineup comes from a URL and names what you have to confirm by name before it is saved:"]
+        lines += ["  %s - %s" % (t, w) for t, w in confirm]
+        lines.append("  save it with: /crew-lineup save %s %s" % (name, " ".join("--allow " + t for t, _w in confirm)))
+    return name, _preview(lu) + "\n".join(lines) + "\n"
 
 
-def commit_pending(name):
-    """Move a fetched lineup into place: json -> <crew>/lineups/<name>.json, files -> their crew-relative paths.
+def commit_pending(name, allow=()):
+    """Move a fetched lineup into place: json -> <crew>/lineups/<name>.json, its texts -> the lineup's own folder
+    <crew>/lineups/<name>/files/<relative path> (replaced whole), nothing else under the crew folder. A lineup fetched
+    from a URL is refused while any needs_confirmation token is missing from `allow`.
     Returns {"path": <lineup json>, "files": [written paths], "overwritten": [paths that existed before]}."""
     stage = _pending_dir(name)
     jpath = os.path.join(stage, name + ".json")
     if not os.path.isfile(jpath):
         raise LineupError("nothing pending for %r (fetch it first)" % name)
-    crew = crew_dir()
+    try:
+        with open(os.path.join(stage, FETCH_META), encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        raise LineupError("pending lineup %r has no fetch record; fetch it again" % name)
+    missing = [t for t in meta.get("confirm") or [] if t not in set(allow or ())]
+    if missing:
+        raise LineupError("lineup %r comes from %s and needs your confirmation by name: %s. Save it with "
+                          "/crew-lineup save %s %s" % (name, meta.get("source"), ", ".join(missing), name,
+                                                        " ".join("--allow " + t for t in meta.get("confirm"))))
+    lineups = os.path.join(crew_dir(), "lineups")
+    final = os.path.join(lineups, name + ".json")
+    fdir = files_dir(final)
     files_root = os.path.join(stage, "files")
     moves = []
     for dirpath, _dirs, fnames in os.walk(files_root):
         for f in fnames:
             srcf = os.path.join(dirpath, f)
-            moves.append((srcf, os.path.join(crew, os.path.relpath(srcf, files_root))))
-    moves.append((jpath, os.path.join(crew, "lineups", name + ".json")))
-    overwritten, written = [], []
+            moves.append((srcf, os.path.join(fdir, os.path.relpath(srcf, files_root))))
+    moves.append((jpath, final))
+    overwritten = [dst for _s, dst in moves if os.path.exists(dst)]
+    shutil.rmtree(fdir, ignore_errors=True)          # the lineup's own folder: last version's texts go
+    written = []
     for srcf, dst in moves:
-        if os.path.exists(dst):
-            overwritten.append(dst)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(srcf, dst)
         written.append(dst)
     shutil.rmtree(stage, ignore_errors=True)
-    return {"path": os.path.join(crew, "lineups", name + ".json"), "files": written, "overwritten": overwritten}
+    return {"path": final, "files": written, "overwritten": overwritten}
 
 
 # ---------------------------------------------------------------- uninstall

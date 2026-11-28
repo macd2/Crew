@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.request
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -384,30 +386,108 @@ class Fetch(LineupCase):
         self.addCleanup(httpd.shutdown)
         return "http://127.0.0.1:%d/" % httpd.server_address[1]
 
-    def test_fetch_url_and_commit(self):
-        site = tempfile.mkdtemp(dir=self.home)
-        os.makedirs(os.path.join(site, "lineups", "prompts", "auditor"))
-        with open(os.path.join(site, "lineups", "prompts", "auditor", "SOUL.md"), "w") as fh:
-            fh.write("Remote soul.")
-        with open(os.path.join(site, "lineups", "remote.json"), "w") as fh:
-            json.dump({"roles": [role(soul_file="prompts/auditor/SOUL.md")]}, fh)
-        for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
-            os.environ.pop(k, None)
-        os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-        url = self.serve(site) + "lineups/remote.json"
-        name, text = crew_lineup.fetch(url)
+    def remote(self, files):
+        """crew_lineup._http_get answered from {url: bytes} (an https server needs a trusted cert; the https and
+        redirect rules themselves are tested on _http_get directly)."""
+        def get(url, limit):
+            if url not in files:
+                raise LineupError("cannot fetch %s: 404" % url)
+            return files[url]
+        p = mock.patch.object(crew_lineup, "_http_get", get)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_fetch_url_and_commit_writes_only_the_lineups_own_folder(self):
+        base = "https://lineups.example/lineups/"
+        self.remote({base + "remote.json": json.dumps({"roles": [role(soul_file="prompts/auditor/SOUL.md"),
+                                                                  role("fixer", brief_file="owner.json")]}).encode(),
+                     base + "prompts/auditor/SOUL.md": b"Remote soul.", base + "owner.json": b"Remote brief."})
+        name, text = crew_lineup.fetch(base + "remote.json")
         self.assertEqual(name, "remote")
         self.assertIn("Remote soul.", text)
+        own = os.path.join(self.crew, "lineups", "remote", "files")
+        self.assertIn(os.path.join(own, "prompts", "auditor", "SOUL.md"), text)   # the targets, before save
+        self.assertIn(os.path.join(own, "owner.json"), text)
         self.assertFalse(os.path.exists(os.path.join(self.crew, "lineups", "remote.json")))
+        crew_owner = self.put("owner.json", '{"owner": "me"}')
         self.put("prompts/auditor/SOUL.md", "old")
         res = crew_lineup.commit_pending("remote")
         self.assertEqual(res["path"], os.path.join(self.crew, "lineups", "remote.json"))
-        self.assertEqual(res["overwritten"], [os.path.join(self.crew, "prompts", "auditor", "SOUL.md")])
-        self.assertEqual(open(os.path.join(self.crew, "prompts", "auditor", "SOUL.md")).read(), "Remote soul.")
-        self.assertEqual(crew_lineup.load("remote")["roles"][0]["soul_text"], "Remote soul.")
+        self.assertEqual(res["overwritten"], [])
+        self.assertTrue(all(p.startswith(os.path.join(self.crew, "lineups", "remote")) for p in res["files"]), res)
+        self.assertEqual(open(crew_owner).read(), '{"owner": "me"}')                 # crew's own file untouched
+        self.assertEqual(open(os.path.join(self.crew, "prompts", "auditor", "SOUL.md")).read(), "old")
+        lu = crew_lineup.load("remote")
+        self.assertEqual(lu["roles"][0]["soul_text"], "Remote soul.")
+        self.assertEqual(lu["roles"][1]["brief_text"], "Remote brief.")
         self.assertFalse(os.path.exists(os.path.join(self.crew, "lineups", ".pending", "remote")))
         with self.assertRaises(LineupError):
             crew_lineup.commit_pending("remote")
+
+    def test_http_is_refused_and_so_is_a_redirect_to_http(self):
+        for url in ("http://lineups.example/x.json", "HTTP://lineups.example/x.json", "ftp://lineups.example/x.json"):
+            with self.subTest(url=url):
+                with self.assertRaises(LineupError) as cm:
+                    crew_lineup.fetch(url)
+                self.assertIn("only https://", str(cm.exception))
+        with self.assertRaises(LineupError) as cm:
+            crew_lineup._http_get("http://lineups.example/x.json", 10)
+        self.assertIn("only https://", str(cm.exception))
+        handler = crew_lineup._HttpsOnlyRedirects()
+        req = urllib.request.Request("https://lineups.example/x.json")
+        with self.assertRaises(LineupError) as cm:
+            handler.redirect_request(req, None, 302, "Found", {}, "http://evil.example/x.json")
+        self.assertIn("only https://", str(cm.exception))
+        self.assertIsNotNone(handler.redirect_request(req, None, 302, "Found", {}, "https://cdn.example/x.json"))
+
+    def test_preview_shows_model_provider_and_base_url_of_every_role(self):
+        text = crew_lineup.preview(self.lineup([role(model="m-1", provider="custom", base_url="https://llm.example/v1"),
+                                                role("fixer")]))
+        self.assertIn("model: m-1 | provider: custom | base_url: https://llm.example/v1", text)
+        self.assertIn("model: (template default) | provider: (template default) | base_url: (none", text)
+
+    def test_a_url_lineup_with_base_url_or_another_profile_needs_confirmation_by_name(self):
+        os.makedirs(os.path.join(self.home, "profiles", "other"))
+        base = "https://lineups.example/"
+        self.remote({base + "risky.json": json.dumps({"inherit": {"mcp": ["other/jira"]}, "roles": [
+            role(base_url="https://llm.example/v1", inherit={"env": "other"})]}).encode()})
+        with mock.patch.object(crew_lineup, "resolve_set", lambda *a: ({}, [])):
+            name, text = crew_lineup.fetch(base + "risky.json")
+        self.assertIn("base_url: https://llm.example/v1", text)
+        self.assertIn("llm.example - role auditor: base_url https://llm.example/v1", text)
+        self.assertIn("other - role auditor: inherit.env from profile other; role auditor: inherit.mcp", text)
+        self.assertIn("/crew-lineup save risky --allow llm.example --allow other", text)
+        for allow in ((), ("llm.example",), ("other",), ("https://llm.example/v1", "other")):
+            with self.subTest(allow=allow):
+                with self.assertRaises(LineupError) as cm:
+                    crew_lineup.commit_pending("risky", allow=allow)
+                self.assertIn("needs your confirmation by name", str(cm.exception))
+                self.assertFalse(os.path.exists(os.path.join(self.crew, "lineups", "risky.json")))
+        crew_lineup.commit_pending("risky", allow=("llm.example", "other"))
+        self.assertTrue(os.path.exists(os.path.join(self.crew, "lineups", "risky.json")))
+
+    def test_a_url_lineup_with_owner_sources_and_no_base_url_needs_nothing(self):
+        base = "https://lineups.example/"
+        self.remote({base + "plain.json": json.dumps({"inherit": {"env": "owner"}, "roles": [role()]}).encode()})
+        _name, text = crew_lineup.fetch(base + "plain.json")
+        self.assertNotIn("--allow", text)
+        crew_lineup.commit_pending("plain")
+        self.assertTrue(os.path.exists(os.path.join(self.crew, "lineups", "plain.json")))
+
+    def test_a_local_lineup_needs_no_confirmation(self):
+        src = tempfile.mkdtemp(dir=self.home)
+        path = os.path.join(src, "loc.json")
+        with open(path, "w") as fh:
+            json.dump({"roles": [role(base_url="https://llm.example/v1")]}, fh)
+        _name, text = crew_lineup.fetch(path)
+        self.assertNotIn("--allow", text)
+        crew_lineup.commit_pending("loc")
+
+    def test_a_url_text_cannot_leave_the_lineups_host(self):
+        base = "https://lineups.example/"
+        self.remote({base + "x.json": json.dumps({"roles": [role(soul_file="http:evil")]}).encode()})
+        with self.assertRaises(LineupError):
+            crew_lineup.fetch(base + "x.json")
 
     def test_fetch_local_with_dest_name(self):
         src = tempfile.mkdtemp(dir=self.home)

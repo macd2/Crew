@@ -26,8 +26,9 @@ def _real(literal, hermes):
     """What a real Hermes prints for `config get` after `config set` of this literal, in a throwaway HERMES_HOME."""
     with tempfile.TemporaryDirectory() as home:
         env = dict(os.environ, HERMES_HOME=home)
-        subprocess.run([hermes, "config", "set", "contract.k", literal], env=env, capture_output=True, text=True, timeout=60)
-        p = subprocess.run([hermes, "config", "get", "contract.k"], env=env, capture_output=True, text=True, timeout=60)
+        # 180 s: a real `hermes` cold start took 46-50 s per set+get pair on a loaded box and once passed 60 s.
+        subprocess.run([hermes, "config", "set", "contract.k", literal], env=env, capture_output=True, text=True, timeout=180)
+        p = subprocess.run([hermes, "config", "get", "contract.k"], env=env, capture_output=True, text=True, timeout=180)
     out = "".join(l + "\n" for l in p.stdout.splitlines() if "Bitwarden" not in l)
     return p.returncode, out
 

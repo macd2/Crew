@@ -1,7 +1,7 @@
 ---
 name: crew-role-content
 description: "Crew content pass: posts, reports, video, pages and social on a crew card; rendered artifact plus source."
-version: 0.11.0
+version: 0.11.1
 ---
 
 # Crew content pass

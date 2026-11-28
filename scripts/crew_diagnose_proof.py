@@ -167,10 +167,12 @@ def main():
               bad.stdout.strip()[:50])
         live = subprocess.run([sys.executable, READER], capture_output=True, text=True, timeout=180,
                               env=dict(os.environ, HERMES_HOME=PROFILE), encoding="utf-8", errors="replace")
+        # The reader heads its answer with one WARNING line when no gateway dispatches (a fresh install, CI):
+        # that is an honest part of the answer, so the count line is the first line that is not that warning.
+        body = [ln for ln in live.stdout.strip().splitlines() if ln.strip() and not ln.startswith("WARNING: ")]
         check("the live board answers the default state",
-              live.returncode == 0 and re.match(r"^diagnose: \d+ card\(s\) in state blocked$",
-                                                live.stdout.strip().splitlines()[0] or ""),
-              live.stdout.strip().splitlines()[0] if live.stdout.strip() else "")
+              live.returncode == 0 and bool(body) and re.match(r"^diagnose: \d+ card\(s\) in state blocked$", body[0]),
+              body[0] if body else live.stdout.strip()[:60])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     reader_src = read(READER)

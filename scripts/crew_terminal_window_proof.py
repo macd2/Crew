@@ -91,11 +91,26 @@ SESS_ID = "probe" + "_termwindow_session"
 
 
 def session_db():
+    """The session store the probe session is written into. On a fresh install no role has run yet, so no
+    state.db exists: create crew-worker's through Hermes's own SessionDB (the real schema, as crew_stop_proof
+    does) instead of failing - a user's first install must pass this proof too."""
     for prof in ("crew-worker", "crew-verifier", "crew-coordinator"):
         path = os.path.join(crew_card.base_home(), "profiles", prof, "state.db")
         if os.path.exists(path):
             return prof, path
-    return None, None
+    prof_dir = os.path.join(crew_card.base_home(), "profiles", "crew-worker")
+    if not os.path.isdir(prof_dir):
+        return None, None
+    path = os.path.join(prof_dir, "state.db")
+    try:
+        sys.path.insert(0, crew_proof_board.AGENT)
+        from pathlib import Path
+        from hermes_state import SessionDB
+        SessionDB(db_path=Path(path)).close()
+    except Exception as exc:  # noqa: BLE001 - reported by the seed check, never a crash
+        print("cannot create a session store at %s: %s" % (path, exc))
+        return None, None
+    return "crew-worker", path
 
 
 def seed_steps(run_start):

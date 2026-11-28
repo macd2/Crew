@@ -2,6 +2,7 @@
 profile really gets (.env, credential sections, hooks, MCP servers, skills) through the fake hermes in a scratch HOME."""
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -256,7 +257,8 @@ class InheritDefaultsAndOrder(_LineupHome):
 
 
 class _Box(TIL._InstallBox):
-    """The install box plus: profile create is recorded and seeds the comment-only .env Hermes seeds."""
+    """The install box plus: profile create is recorded; bare it seeds the comment-only .env Hermes seeds, with
+    --clone-from it copies what Hermes's clone copies (.env, the config, memories) - crew itself never reads them."""
     def setUp(self):
         super().setUp()
         self.created = []
@@ -266,9 +268,26 @@ class _Box(TIL._InstallBox):
         if args[:2] == ("profile", "create"):
             self.created.append(args)
             r = super().fake_h(profile, *args)
-            Path(self.home(args[2]), ".env").write_text("# Hermes placeholder\n", encoding="utf-8")
+            new = self.home(args[2])
+            if "--clone-from" in args:
+                src = args[args.index("--clone-from") + 1]
+                for rel in (".env", "memories/MEMORY.md", "memories/USER.md"):
+                    if os.path.isfile(os.path.join(self.home(src), rel)):
+                        os.makedirs(os.path.dirname(os.path.join(new, rel)), exist_ok=True)
+                        shutil.copyfile(os.path.join(self.home(src), rel), os.path.join(new, rel))
+                        os.chmod(os.path.join(new, rel), 0o600)   # as Hermes's _clone_file does
+                for plug in ("zulip-platform", "crew"):
+                    os.makedirs(os.path.join(new, "plugins", plug), exist_ok=True)
+                self.cfg.store[args[2]] = dict(self.cfg.store.get(src, {}))
+            else:
+                Path(new, ".env").write_text("# Hermes placeholder\n", encoding="utf-8")
             return r
         return super().fake_h(profile, *args)
+
+    def source_secret_reads(self):
+        """`config get` calls crew made for a credential section of a profile it did not create (must be none)."""
+        return [c for c in self.cfg.calls if c[1:3] == ("config", "get") and c[3] in CI.ENV_SECTIONS
+                and not c[0].startswith("crew-")]
 
     def write_owner(self):
         Path(self.home("chat"), ".env").write_text("ANTHROPIC_API_KEY=x\n", encoding="utf-8")
@@ -288,6 +307,8 @@ class _Box(TIL._InstallBox):
 
 class InstallInheritDefaults(_Box):
     def test_shipped_crew_roles_get_env_hooks_secrets_and_no_mcp(self):
+        os.makedirs(os.path.join(self.home("chat"), "memories"), exist_ok=True)
+        Path(self.home("chat"), "memories", "MEMORY.md").write_text("owner memory\n", encoding="utf-8")
         rc, out = self.run_installer()
         self.assertEqual(0, rc, out)
         for role in ROLES:
@@ -300,11 +321,17 @@ class InstallInheritDefaults(_Box):
             self.assertEqual(HOOKS, json.loads(conf["hooks"]), name)
             self.assertEqual(SECRETS, json.loads(conf["secrets"]), name)
             self.assertEqual({}, json.loads(conf.get("mcp_servers") or "{}"), name)
-            self.assertIn((name, "hooks"), self.cfg.forced)
+            self.assertNotIn((name, "secrets"), self.cfg.forced)   # the clone carried them; crew never sets them
+            self.assertFalse(os.path.exists(os.path.join(self.home(name), "memories", "MEMORY.md")), name)
+            self.assertEqual("chat", CI._shipped_record(self.home(name))["env_from"], name)
+            self.assertEqual(["crew"], sorted(os.listdir(os.path.join(self.home(name), "plugins"))), name)
+            self.assertIn((name, "plugins.enabled"), self.cfg.forced)
         self.assertTrue(self.created)
         for args in self.created:
-            self.assertIn("--no-skills", args)
-            self.assertNotIn("--clone-from", args)
+            # credentials come through Hermes's own clone, never a copy by crew
+            self.assertEqual("chat", args[args.index("--clone-from") + 1], args)
+            self.assertNotIn("--no-skills", args)
+        self.assertEqual([], self.source_secret_reads())
 
     def test_second_check_converges(self):
         self.assertEqual(0, self.run_installer()[0])
@@ -357,7 +384,35 @@ class InstallInheritLineup(_Box):
         self.assertTrue(os.path.isfile(os.path.join(fix, "skills", "tools", "bar", "SKILL.md")))
         self.assertEqual(["ANTHROPIC_API_KEY=x"], _creds(os.path.join(fix, ".env")))
         self.assertEqual(HOOKS, json.loads(self.cfg.store["crew-fixer"]["hooks"]))
+        clones = {a[2]: a[a.index("--clone-from") + 1] for a in self.created if "--clone-from" in a}
+        self.assertEqual("other", clones["crew-auditor"])
+        self.assertEqual("chat", clones["crew-fixer"])
+        self.assertEqual([], self.source_secret_reads())
         self.assertConverges()
+
+    def test_env_false_creates_bare_with_no_clone(self):
+        self.write_lineup({"name": "duo", "inherit": {"env": False}, "roles": TIL.DUO["roles"]})
+        self.assertEqual(0, self.run_installer("--lineup", "duo")[0])
+        args = [a for a in self.created if a[2] == "crew-auditor"][0]
+        self.assertIn("--no-skills", args)
+        self.assertNotIn("--clone-from", args)
+        self.assertIs(False, CI._shipped_record(self.home("crew-auditor"))["env_from"])
+        self.assertEqual([], _creds(os.path.join(self.home("crew-auditor"), ".env")))
+
+    def test_a_changed_env_source_is_reported_never_copied(self):
+        """Hermes copies credentials only at create: a role cloned from one profile whose inherit.env now names
+        another is a problem naming the fix, and its .env is left as it is."""
+        other = self.make_profile("other", env="OTHER_KEY=1\n")
+        self.assertTrue(os.path.isdir(other))
+        self.write_lineup({"name": "duo", "roles": TIL.DUO["roles"]})
+        self.assertEqual(0, self.run_installer("--lineup", "duo")[0])
+        self.write_lineup({"name": "duo", "inherit": {"env": "other"}, "roles": TIL.DUO["roles"]})
+        rc, out = self.run_installer("--lineup", "duo")
+        self.assertNotEqual(0, rc, out)
+        self.assertIn("was cloned from 'chat'", out)
+        self.assertIn("hermes profile delete crew-auditor", out)
+        self.assertEqual(["ANTHROPIC_API_KEY=x"], _creds(os.path.join(self.home("crew-auditor"), ".env")))
+        self.assertEqual([], self.source_secret_reads())
 
     def test_env_false_strips_credentials_from_an_existing_role_profile(self):
         self.write_lineup({"name": "duo", "inherit": {"env": False}, "roles": TIL.DUO["roles"]})

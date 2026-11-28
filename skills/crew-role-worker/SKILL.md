@@ -1,7 +1,7 @@
 ---
 name: crew-role-worker
 description: "Crew worker pass: code, config, infra and web work on a crew card; one writer, proof on disk."
-version: 0.11.0
+version: 0.11.1
 ---
 
 # Crew worker pass

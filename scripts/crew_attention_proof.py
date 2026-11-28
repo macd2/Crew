@@ -402,8 +402,10 @@ def browser_leg():
                 check("a drawn row exists to clear", False, "no row in the list")
 
             ws.evaluate("document.getElementById('clearall').click()")
+            # 30 s, not 10: the release gate runs 28 proofs back to back on a fresh install and there the
+            # clear landed after 10 s (rows 2 badge 2); run alone it passed 3 of 3 in 5-6 s.
             ws.wait_for("document.querySelectorAll('#noterows .ar').length === 0 && "
-                        "document.getElementById('belln').textContent === '0'", timeout=10)
+                        "document.getElementById('belln').textContent === '0'", timeout=30)
             empty = ws.evaluate(READ_PANEL) or {}
             check("clear all empties the drawn list",
                   empty.get("rows") == 0 and str(empty.get("badge")) == "0",

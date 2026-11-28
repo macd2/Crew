@@ -3229,7 +3229,7 @@ function Splash({ api }) {
     ] }),
     /* @__PURE__ */ jsxs17("div", { className: "sp-foot", children: [
       "crew.forgecoreai.com \xB7 v",
-      "0.11.0"
+      "0.11.1"
     ] })
   ] });
 }

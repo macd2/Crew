@@ -22,8 +22,10 @@ package. Delete one and the next install puts it back.
     /crew-lineup                      the active lineup, its status, and the lineups you can use
     /crew-lineup use NAME             switch (background install), no ask
     /crew-lineup show NAME            every role, model, toolset and text in full
-    /crew-lineup add <url|path>       fetch a lineup and show everything in it; nothing is saved yet
-    /crew-lineup save NAME            save the lineup `add` showed you
+    /crew-lineup add <https-url|path> fetch a lineup (https only) and show everything in it: every role's model,
+                                      provider and base_url, and the paths save writes; nothing is saved yet
+    /crew-lineup save NAME            save the lineup `add` showed you, into lineups/NAME.json + lineups/NAME/files/
+    /crew-lineup save NAME --allow X  a URL lineup with a base_url or a profile other than yours: confirm each by name
     /crew-lineup default              back to the default crew (worker + content)
     /crew-lineup uninstall NAME       what uninstalling would remove; add --yes to do it
 

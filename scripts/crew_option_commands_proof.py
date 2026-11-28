@@ -37,7 +37,7 @@ PLUGIN = os.path.join(PROFILE, "plugins", "crew", "__init__.py")
 # set; the proof does the same, or it would run whatever crew copy the base home holds.
 os.environ.setdefault("HERMES_HOME", PROFILE)
 MANIFEST = os.path.join(PROFILE, "plugins", "crew", "plugin.yaml")
-OPTIONS = ["status", "graph", "stop", "unstuck", "safety", "proof"]
+OPTIONS = ["status", "graph", "stop", "unstuck", "safety", "proof", "lineup"]
 # The commands the owner surface no longer has. None may be registered, and the usage text names none.
 REMOVED = ["crew-run", "crew-verify", "crew-roles", "crew-install", "crew-ops", "crew-unblock", "crew-unstale",
            "crew-heal", "crew-triage"]
@@ -47,6 +47,7 @@ REMOVED = ["crew-run", "crew-verify", "crew-roles", "crew-install", "crew-ops", 
 CALLS = {
     "status": "", "graph": "latest",
     "stop": "--dry-run",
+    "lineup": "",       # no argument only shows the lineup and the ones available
 }
 # graph merged three options into one command with two flag modes: both modes are exercised here, so
 # the merge cannot quietly drop one of them. --watch 1 is one second, well under the proof's ceiling.
@@ -74,6 +75,46 @@ def load(path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def seed_probe_card():
+    """One probe card with one run on the pinned proofs board when that board has no card yet; '' when one is
+    already there (nothing to drop) or when the board is not pinned (the guard refuses the live board)."""
+    import sqlite3
+    import time
+    import crew_proof_board
+    db = crew_proof_board.proof_db()
+    conn = sqlite3.connect(db)
+    try:
+        if conn.execute("select 1 from tasks limit 1").fetchone():
+            return ""
+        now = int(time.time())
+        card = "t_0c0de%03d" % (now % 1000)
+        conn.execute("insert into tasks (id, title, body, assignee, status, priority, created_by, created_at, "
+                     "workspace_kind) values (?, ?, ?, ?, 'done', 0, ?, ?, 'scratch')",
+                     (card, "PROBE option commands graph %d" % now,
+                      "Coordinator: %s/\nGoal: probe card for /crew-graph latest\nRole: worker\n"
+                      % crew_card.owner_profile(), crew_card.FIXTURE_ASSIGNEE, crew_card.PROBE_OWNER, now))
+        conn.execute("insert into task_runs (task_id, profile, status, started_at, ended_at, outcome, summary) "
+                     "values (?, 'crew-worker', 'done', ?, ?, 'completed', 'probe run')", (card, now - 60, now - 30))
+        conn.commit()
+        return card
+    finally:
+        conn.close()
+
+
+def drop_probe_card(card):
+    if not card:
+        return
+    import sqlite3
+    import crew_proof_board
+    conn = sqlite3.connect(crew_proof_board.proof_db())
+    try:
+        conn.execute("delete from task_runs where task_id = ?", (card,))
+        conn.execute("delete from tasks where id = ?", (card,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def main():
@@ -126,7 +167,10 @@ def main():
             ok = ok and "dry run" in text.lower()      # the pass prints its mode
         check("/%s runs and answers" % cmd, ok, text.strip().splitlines()[0][:70] if text.strip() else "")
 
-    # 3b - the merged graph modes: --watch N and --html [PATH] answer through the one command
+    # 3b - the merged graph modes: --watch N and --html [PATH] answer through the one command. "latest" needs a
+    # card: on a fresh install (or `--only` on a new proofs board) there is none, so seed one probe card on the
+    # pinned proofs board for these two calls and drop it after - never on the live board (the guard exits 2).
+    seeded = seed_probe_card()
     for mode in GRAPH_MODES:
         arg = mode
         tmp = None
@@ -148,6 +192,7 @@ def main():
                     os.remove(os.path.join(tmp, "crew-proof-card.graph" + ext))
                 except OSError:
                     pass
+    drop_probe_card(seeded)
 
     # 4 - /crew-status is the crew cards in flight of the board it reads
     try:
